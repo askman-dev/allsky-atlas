@@ -54,11 +54,12 @@ function App() {
       try {
         setLoading(true);
         // Fetch JSON files compiled by ingest script
+        const basePath = import.meta.env.BASE_URL || '/';
         const [starsRes, westernRes, chineseRes, boundariesRes] = await Promise.all([
-          fetch('/data/stars.normalized.json').then(r => r.json()),
-          fetch('/data/constellations.western.json').then(r => r.json()),
-          fetch('/data/constellations.chinese.json').then(r => r.json()),
-          fetch('/data/boundaries.json').then(r => r.json()),
+          fetch(`${basePath}data/stars.normalized.json`).then(r => r.json()),
+          fetch(`${basePath}data/constellations.western.json`).then(r => r.json()),
+          fetch(`${basePath}data/constellations.chinese.json`).then(r => r.json()),
+          fetch(`${basePath}data/boundaries.json`).then(r => r.json()),
         ]);
 
         setStars(starsRes);
