@@ -19,6 +19,20 @@ const MAG_RANGE_PLUS = 7;
 const MAG_RANGE_MAX = MAG_RANGE_PLUS;
 const MAG_RANGE_STEP = 1;
 const MAG_RANGE_TICKS = [0, 1, 2, 3, 4, 5, 6, MAG_RANGE_PLUS];
+const POSTER_LAYOUTS = {
+  landscape_dual: {
+    id: 'landscape_dual',
+    width: 1700,
+    height: 1200,
+    sphereRadius: 330,
+  },
+  portrait_single: {
+    id: 'portrait_single',
+    width: 1200,
+    height: 1700,
+    sphereRadius: 470,
+  },
+};
 const BOUNDARY_MAX_SEGMENT_DEG = 2.25;
 const BOUNDARY_LOOKAHEAD = 8;
 const LANGUAGE_MODES = new Set(['zh', 'en', 'both']);
@@ -59,6 +73,10 @@ const UI_TEXT = {
     errorHint: 'Run node src/ingest/parse.js in the terminal to regenerate the data.',
     themeTypography: 'Design Theme & Typography',
     starMapTemplate: 'Star Map Style Template',
+    posterLayout: 'Poster Layout',
+    layoutLandscapeDual: 'Landscape Dual Circles',
+    layoutPortraitSingle: 'Portrait Single Circle',
+    transparentBackground: 'Transparent Background',
     themeClassicNavy: 'Classic Navy',
     themeDeepSpace: 'Deep Space',
     themeElegantWhite: 'Elegant White',
@@ -119,6 +137,10 @@ const UI_TEXT = {
     errorHint: '请在终端执行 node src/ingest/parse.js 重新生成数据。',
     themeTypography: '设计主题与排版',
     starMapTemplate: '星图风格模板',
+    posterLayout: '海报布局',
+    layoutLandscapeDual: '横版双圈',
+    layoutPortraitSingle: '竖版单圈',
+    transparentBackground: '背景透明',
     themeClassicNavy: 'Classic Navy (经典深蓝)',
     themeDeepSpace: 'Deep Space (深空霓虹)',
     themeElegantWhite: 'Elegant White (极简黑白)',
@@ -373,6 +395,8 @@ function App() {
   const customNote = customNoteOverrides[displayLanguage] ?? POSTER_COPY_PRESETS[displayLanguage].customNote;
   const [fontFamily, setFontFamily] = useState("serif"); // "serif" or "sans"
   const [themeId, setThemeId] = useState("classic_navy");
+  const [posterLayout, setPosterLayout] = useState("landscape_dual");
+  const [transparentBackground, setTransparentBackground] = useState(false);
 
   // --- Astronomical Settings ---
   const [projection, setProjection] = useState("polar_equidistant"); // "polar_equidistant" or "polar_stereographic"
@@ -439,6 +463,8 @@ function App() {
 
   // --- Active Theme ---
   const activeTheme = useMemo(() => THEMES[themeId] || THEMES.classic_navy, [themeId]);
+  const posterBackgroundColor = transparentBackground ? 'none' : activeTheme.posterBg;
+  const sphereBackgroundColor = transparentBackground ? 'none' : activeTheme.background;
 
   // --- Fast Lookup Dictionary for Stars ---
   const starsMap = useMemo(() => {
@@ -565,13 +591,10 @@ function App() {
   };
 
   // --- Poster dimensions and radius of the main circular spheres ---
-  const POSTER_WIDTH = 1700;
-  const POSTER_HEIGHT = 1200;
-  const R = 330;
-
-  // --- Projection Functions ---
-  const projectN = (ra, dec) => projectNorth(ra, dec, R, projection, -overlapDec, northRotation);
-  const projectS = (ra, dec) => projectSouth(ra, dec, R, projection, overlapDec, southRotation);
+  const landscapeLayout = POSTER_LAYOUTS.landscape_dual;
+  const portraitLayout = POSTER_LAYOUTS.portrait_single;
+  const LANDSCAPE_R = landscapeLayout.sphereRadius;
+  const PORTRAIT_R = portraitLayout.sphereRadius;
   const formatMagFilterValue = (value) => {
     if (value <= MAG_RANGE_MIN) return '0-';
     if (value >= MAG_RANGE_PLUS) return '6+';
@@ -1061,10 +1084,12 @@ function App() {
   };
 
   // --- Render Components inside SVG for a single Sphere ---
-  const renderSphere = (isNorth) => {
-    const projectFn = isNorth ? projectN : projectS;
+  const renderSphere = (isNorth, sphereRadius = POSTER_LAYOUTS.landscape_dual.sphereRadius, clipPrefix = '') => {
+    const projectFn = isNorth
+      ? (ra, dec) => projectNorth(ra, dec, sphereRadius, projection, -overlapDec, northRotation)
+      : (ra, dec) => projectSouth(ra, dec, sphereRadius, projection, overlapDec, southRotation);
     const limitDec = isNorth ? -overlapDec : overlapDec;
-    const clipId = isNorth ? "north-clip" : "south-clip";
+    const clipId = `${clipPrefix}${isNorth ? "north-clip" : "south-clip"}`;
 
     // 1. Filter visible stars
     const visibleStars = stars.filter(s => {
@@ -1157,7 +1182,7 @@ function App() {
         if (pt) {
           // Distance from pole
           const distFromCenter = Math.sqrt(pt.x * pt.x + pt.y * pt.y);
-          if (distFromCenter < R - 15) {
+          if (distFromCenter < sphereRadius - 15) {
             const text = getLocalizedText(con.nameZh, con.nameEn);
 
             labelCandidates.push({
@@ -1184,7 +1209,7 @@ function App() {
           if (inSphere) {
             const pt = projectFn(center.ra, center.dec);
             const distFromCenter = Math.sqrt(pt.x * pt.x + pt.y * pt.y);
-            if (distFromCenter < R - 15) {
+            if (distFromCenter < sphereRadius - 15) {
               labelCandidates.push({
                 id: `zh-con-${ast.id}`,
                 text: ast.nameZh,
@@ -1223,7 +1248,7 @@ function App() {
     }
 
     // Resolve labels
-    const resolvedLabels = resolveLabels(labelCandidates, R, starPoints.filter(s => s.mag <= 2.5));
+    const resolvedLabels = resolveLabels(labelCandidates, sphereRadius, starPoints.filter(s => s.mag <= 2.5));
 
     // 8. Ticks around the circle rim
     const ticks = [];
@@ -1271,14 +1296,14 @@ function App() {
         {/* Clip definition unique for this sphere */}
         <defs>
           <clipPath id={clipId}>
-            <circle cx="0" cy="0" r={R} />
+            <circle cx="0" cy="0" r={sphereRadius} />
           </clipPath>
         </defs>
 
         {/* Clipped Sphere Group */}
         <g clipPath={`url(#${clipId})`}>
           {/* Background fill */}
-          <circle cx="0" cy="0" r={R} fill={activeTheme.background} />
+          <circle cx="0" cy="0" r={sphereRadius} fill={sphereBackgroundColor} />
 
           {/* Milky Way ribbons */}
           {showMilkyWay && (
@@ -1348,14 +1373,11 @@ function App() {
           )}
 
           {boundaryFillRegions.length > 0 && (
-            <g opacity="0.14">
+            <g opacity="0.18">
               {boundaryFillRegions.map((region) => (
                 <g
                   key={`boundary-fill-${isNorth ? 'n' : 's'}-${region.abbr}`}
                   fill={CONSTELLATION_FILL_PALETTE[region.colorIndex % CONSTELLATION_FILL_PALETTE.length]}
-                  stroke={CONSTELLATION_FILL_PALETTE[region.colorIndex % CONSTELLATION_FILL_PALETTE.length]}
-                  strokeWidth="8"
-                  strokeLinejoin="round"
                 >
                   {region.paths.map((path, index) => (
                     <path
@@ -1505,8 +1527,8 @@ function App() {
         </g>
 
         {/* Ticks and grid degree markings outside the sphere */}
-        <circle cx="0" cy="0" r={R} fill="none" stroke={activeTheme.border} strokeWidth="1.5" />
-        <circle cx="0" cy="0" r={R + 8} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+        <circle cx="0" cy="0" r={sphereRadius} fill="none" stroke={activeTheme.border} strokeWidth="1.5" />
+        <circle cx="0" cy="0" r={sphereRadius + 8} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
 
         {ticks.map((t) => (
           <g key={t.id}>
@@ -1541,22 +1563,47 @@ function App() {
   const varFontPosterSerif = "'Lora', 'Noto Serif SC', serif";
   const varFontPosterSans = "'Outfit', 'Noto Sans SC', sans-serif";
   const activePosterFont = fontFamily === "serif" ? varFontPosterSerif : varFontPosterSans;
+  const getDownloadBaseName = (suffix) => (
+    `${title.toLowerCase().replace(/\s+/g, '_')}_${suffix}`
+  );
+
+  const getVisiblePosterSvgs = () => (
+    [...document.querySelectorAll('svg[data-export-svg="true"]')]
+  );
+
+  const getSvgDimensions = (svgEl) => {
+    const viewBox = svgEl.getAttribute('viewBox')?.split(/\s+/).map(Number);
+    if (viewBox?.length === 4 && viewBox.every(Number.isFinite)) {
+      return { width: viewBox[2], height: viewBox[3] };
+    }
+    return {
+      width: Number(svgEl.getAttribute('width')) || POSTER_LAYOUTS.landscape_dual.width,
+      height: Number(svgEl.getAttribute('height')) || POSTER_LAYOUTS.landscape_dual.height,
+    };
+  };
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   // --- Export SVG File ---
   const exportSVG = () => {
-    const svgEl = document.getElementById('poster-svg');
-    if (!svgEl) return;
+    const svgEls = getVisiblePosterSvgs();
+    if (svgEls.length === 0) return;
     try {
-      const svgString = new XMLSerializer().serializeToString(svgEl);
-      const blob = new Blob([`<?xml version="1.0" encoding="utf-8"?>\n`, svgString], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${title.toLowerCase().replace(/\s+/g, '_')}_poster.svg`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      for (const svgEl of svgEls) {
+        const svgString = new XMLSerializer().serializeToString(svgEl);
+        const suffix = svgEl.dataset.exportSuffix || 'poster';
+        const blob = new Blob([`<?xml version="1.0" encoding="utf-8"?>\n`, svgString], { type: 'image/svg+xml;charset=utf-8' });
+        downloadBlob(blob, `${getDownloadBaseName(suffix)}.svg`);
+      }
       showToast(uiText.exportedSvg);
     } catch (e) {
       console.error(e);
@@ -1566,40 +1613,42 @@ function App() {
 
   // --- Export PNG File at High-Res (3x scale) ---
   const exportPNG = () => {
-    const svgEl = document.getElementById('poster-svg');
-    if (!svgEl) return;
+    const svgEls = getVisiblePosterSvgs();
+    if (svgEls.length === 0) return;
     showToast(uiText.renderingPng);
 
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
         const scale = 3.5; // 3.5x scale for print-quality landscape export.
-        const width = POSTER_WIDTH * scale;
-        const height = POSTER_HEIGHT * scale;
+        for (const svgEl of svgEls) {
+          const { width: baseWidth, height: baseHeight } = getSvgDimensions(svgEl);
+          const width = baseWidth * scale;
+          const height = baseHeight * scale;
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          const svgString = new XMLSerializer().serializeToString(svgEl);
+          const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const img = new Image();
 
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = url;
+          });
 
-        // Serialize SVG string
-        const svgString = new XMLSerializer().serializeToString(svgEl);
-        const img = new Image();
-        const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-
-        img.onload = () => {
           ctx.drawImage(img, 0, 0, width, height);
-          const pngUrl = canvas.toDataURL('image/png');
-          const link = document.createElement('a');
-          link.href = pngUrl;
-          link.download = `${title.toLowerCase().replace(/\s+/g, '_')}_poster.png`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
           URL.revokeObjectURL(url);
-          showToast(uiText.exportedPng);
-        };
-        img.src = url;
+          const suffix = svgEl.dataset.exportSuffix || 'poster';
+          const pngBlob = await new Promise((resolve) => {
+            canvas.toBlob(resolve, 'image/png');
+          });
+          if (!pngBlob) throw new Error('PNG rendering returned an empty blob.');
+          downloadBlob(pngBlob, `${getDownloadBaseName(suffix)}.png`);
+        }
+        showToast(uiText.exportedPng);
       } catch (e) {
         console.error(e);
         showToast(uiText.exportPngFailed);
@@ -1655,6 +1704,28 @@ function App() {
                 <option value="qirui_retro">{uiText.themeRetroParchment}</option>
               </select>
             </div>
+            <div className="form-field">
+              <label>{uiText.posterLayout}</label>
+              <div className="segmented-control" role="group" aria-label={uiText.posterLayout}>
+                <button
+                  type="button"
+                  className={`segment-button ${posterLayout === 'landscape_dual' ? 'active' : ''}`}
+                  onClick={() => setPosterLayout('landscape_dual')}
+                >
+                  {uiText.layoutLandscapeDual}
+                </button>
+                <button
+                  type="button"
+                  className={`segment-button ${posterLayout === 'portrait_single' ? 'active' : ''}`}
+                  onClick={() => setPosterLayout('portrait_single')}
+                >
+                  {uiText.layoutPortraitSingle}
+                </button>
+              </div>
+            </div>
+            <ToggleRow checked={transparentBackground} onChange={setTransparentBackground}>
+              {uiText.transparentBackground}
+            </ToggleRow>
             <div className="form-field">
               <label>{uiText.fontFamily}</label>
               <select
@@ -1899,28 +1970,31 @@ function App() {
       >
         <div
           ref={posterMockupRef}
-          className="poster-mockup"
+          className={`poster-preview-stage ${posterLayout === 'portrait_single' ? 'portrait-stage' : ''}`}
         >
+        <div className={`poster-mockup ${posterLayout !== 'landscape_dual' ? 'is-hidden' : ''}`}>
           <div className="poster-svg-wrapper">
             {/* The absolute master SVG */}
             <svg
-              id="poster-svg"
-              viewBox={`0 0 ${POSTER_WIDTH} ${POSTER_HEIGHT}`}
-              width={POSTER_WIDTH}
-              height={POSTER_HEIGHT}
+              id="poster-svg-landscape"
+              data-export-svg={posterLayout === 'landscape_dual' ? 'true' : undefined}
+              data-export-suffix="landscape-dual"
+              viewBox={`0 0 ${landscapeLayout.width} ${landscapeLayout.height}`}
+              width={landscapeLayout.width}
+              height={landscapeLayout.height}
               xmlns="http://www.w3.org/2000/svg"
             >
               {/* Poster Board Fill */}
-              <rect width={POSTER_WIDTH} height={POSTER_HEIGHT} fill={activeTheme.posterBg} />
+              <rect width={landscapeLayout.width} height={landscapeLayout.height} fill={posterBackgroundColor} />
 
               {/* Decorative Poster Borders */}
               {/* Outer frame border */}
-              <rect x="25" y="25" width={POSTER_WIDTH - 50} height={POSTER_HEIGHT - 50} fill="none" stroke={activeTheme.border} strokeWidth="3" />
+              <rect x="25" y="25" width={landscapeLayout.width - 50} height={landscapeLayout.height - 50} fill="none" stroke={activeTheme.border} strokeWidth="3" />
               {/* Inner thin border */}
-              <rect x="33" y="33" width={POSTER_WIDTH - 66} height={POSTER_HEIGHT - 66} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+              <rect x="33" y="33" width={landscapeLayout.width - 66} height={landscapeLayout.height - 66} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
 
               {/* Poster Title Block */}
-              <g transform={`translate(${POSTER_WIDTH / 2}, 95)`}>
+              <g transform={`translate(${landscapeLayout.width / 2}, 95)`}>
                 <text
                   x="0"
                   y="0"
@@ -1951,10 +2025,10 @@ function App() {
 
               {/* 1. NORTHERN CELESTIAL ATMOSPHERE */}
               <g transform="translate(455, 525)">
-                {renderSphere(true)}
+                {renderSphere(true, LANDSCAPE_R, 'landscape-')}
                 <text
                   x="0"
-                  y={R + 42}
+                  y={LANDSCAPE_R + 42}
                   textAnchor="middle"
                   fill={activeTheme.text.title}
                   fontFamily={activePosterFont}
@@ -1968,10 +2042,10 @@ function App() {
 
               {/* 2. SOUTHERN CELESTIAL ATMOSPHERE */}
               <g transform="translate(1245, 525)">
-                {renderSphere(false)}
+                {renderSphere(false, LANDSCAPE_R, 'landscape-')}
                 <text
                   x="0"
-                  y={R + 42}
+                  y={LANDSCAPE_R + 42}
                   textAnchor="middle"
                   fill={activeTheme.text.title}
                   fontFamily={activePosterFont}
@@ -2110,6 +2184,175 @@ function App() {
               </g>
             </svg>
           </div>
+        </div>
+        <div className={`poster-export-set portrait-set ${posterLayout !== 'portrait_single' ? 'is-hidden' : ''}`}>
+          {[true, false].map((isNorth) => {
+            const suffix = isNorth ? 'north' : 'south';
+            const hemisphereTitle = isNorth
+              ? getLocalizedText('北天恒星图', 'NORTHERN CELESTIAL ATMOSPHERE', 'en-first')
+              : getLocalizedText('南天恒星图', 'SOUTHERN CELESTIAL ATMOSPHERE', 'en-first');
+
+            return (
+              <div className="poster-mockup portrait-mockup" key={suffix}>
+                <div className="poster-svg-wrapper">
+                  <svg
+                    id={`poster-svg-${suffix}`}
+                    data-export-svg={posterLayout === 'portrait_single' ? 'true' : undefined}
+                    data-export-suffix={`portrait-${suffix}`}
+                    viewBox={`0 0 ${portraitLayout.width} ${portraitLayout.height}`}
+                    width={portraitLayout.width}
+                    height={portraitLayout.height}
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <rect width={portraitLayout.width} height={portraitLayout.height} fill={posterBackgroundColor} />
+                    <rect x="25" y="25" width={portraitLayout.width - 50} height={portraitLayout.height - 50} fill="none" stroke={activeTheme.border} strokeWidth="3" />
+                    <rect x="33" y="33" width={portraitLayout.width - 66} height={portraitLayout.height - 66} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+
+                    <g transform={`translate(${portraitLayout.width / 2}, 92)`}>
+                      <text
+                        x="0"
+                        y="0"
+                        textAnchor="middle"
+                        fill={activeTheme.text.title}
+                        fontFamily={activePosterFont}
+                        fontSize="32"
+                        fontWeight="bold"
+                        letterSpacing="3"
+                      >
+                        {title}
+                      </text>
+                      <line x1="-210" y1="38" x2="210" y2="38" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.7" />
+                      <text
+                        x="0"
+                        y="58"
+                        textAnchor="middle"
+                        fill={activeTheme.text.body}
+                        fontFamily={varFontPosterSans}
+                        fontSize="8.5"
+                        fontWeight="500"
+                        letterSpacing="1.5"
+                        opacity="0.7"
+                      >
+                        {customNote.toUpperCase()}
+                      </text>
+                    </g>
+
+                    <g transform={`translate(${portraitLayout.width / 2}, 710)`}>
+                      {renderSphere(isNorth, PORTRAIT_R, `portrait-${suffix}-`)}
+                      <text
+                        x="0"
+                        y={PORTRAIT_R + 48}
+                        textAnchor="middle"
+                        fill={activeTheme.text.title}
+                        fontFamily={activePosterFont}
+                        fontSize="16"
+                        fontWeight="bold"
+                        letterSpacing="2.2"
+                      >
+                        {hemisphereTitle}
+                      </text>
+                    </g>
+
+                    <g transform="translate(80, 1305)">
+                      <line x1="0" y1="-12" x2="1040" y2="-12" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
+
+                      <g transform="translate(0, 12)">
+                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.4">
+                          {getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}
+                        </text>
+                        <g transform="translate(0, 28)">
+                          {[1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map((mag, i) => {
+                            const r = Math.max(0.5, 4.5 - 0.6 * mag);
+                            const xOffset = i * 42;
+                            const isRetro = activeTheme.stars.retroRings;
+
+                            return (
+                              <g key={`portrait-leg-star-${suffix}-${i}`} transform={`translate(${xOffset}, 0)`}>
+                                {isRetro ? (
+                                  <g>
+                                    <circle cx="0" cy="0" r={Math.max(0.5, 2.0 - 0.25 * mag)} fill="#201e1a" />
+                                    <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
+                                  </g>
+                                ) : (
+                                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} />
+                                )}
+                                <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.5">{mag.toFixed(0)}m</text>
+                              </g>
+                            );
+                          })}
+                        </g>
+                        <g transform="translate(0, 78)" fontSize="8.2" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                          <g transform="translate(0, 0)">
+                            <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />
+                            <text x="34" y="3.5">{getLocalizedText('天球赤道', 'Celestial Equator', 'en-first')}</text>
+                          </g>
+                          <g transform="translate(0, 18)">
+                            <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.ecliptic.color} strokeWidth="1.2" strokeDasharray={activeTheme.ecliptic.dash} />
+                            <text x="34" y="3.5">{getLocalizedText('黄道轨道', 'Ecliptic Path', 'en-first')}</text>
+                          </g>
+                          <g transform="translate(0, 36)">
+                            <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.constellations.line} strokeWidth="1" opacity={activeTheme.constellations.lineOpacity} />
+                            <text x="34" y="3.5">{getLocalizedText('星座连线', 'Constellation Line', 'en-first')}</text>
+                          </g>
+                        </g>
+                      </g>
+
+                      <g transform="translate(0, 170)">
+                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="10" fontWeight="bold" letterSpacing="1.2">
+                          {getLocalizedText('名词解释', 'MAP TERMS', 'en-first')}
+                        </text>
+                        <text x="0" y="18" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="8">
+                          {isNorth
+                            ? getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')
+                            : getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
+                        </text>
+                        <text x="0" y="34" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="8">
+                          {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
+                        </text>
+                        <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
+                          <text x="0" y="58" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize="8.5" fontWeight="600">
+                            github.com/askman-dev/allsky-atlas
+                          </text>
+                        </a>
+                      </g>
+
+                      <g transform="translate(610, 12)">
+                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.4">
+                          {getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}
+                        </text>
+                        <g transform="translate(0, 24)" fontSize="8" fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
+                          <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
+                          <text x="132" y="0">MAG</text>
+                          <text x="172" y="0">R.A.</text>
+                          <text x="232" y="0">DEC.</text>
+                          <text x="282" y="0">SP.</text>
+                        </g>
+
+                        {brightestStars.map((star, i) => {
+                          const y = 39 + i * 16;
+                          const spectralClass = star.colorIdx < -0.1 ? 'O/B' :
+                                                star.colorIdx < 0.3 ? 'A' :
+                                                star.colorIdx < 0.5 ? 'F' :
+                                                star.colorIdx < 0.8 ? 'G' :
+                                                star.colorIdx < 1.3 ? 'K' : 'M';
+                          return (
+                            <g key={`portrait-table-row-${suffix}-${i}`} transform={`translate(0, ${y})`} fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                              <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
+                              <text x="132" y="0">{star.mag.toFixed(2)}</text>
+                              <text x="172" y="0">{formatRA(star.ra)}</text>
+                              <text x="232" y="0">{formatDec(star.dec)}</text>
+                              <text x="282" y="0">{spectralClass}</text>
+                            </g>
+                          );
+                        })}
+                      </g>
+                    </g>
+                  </svg>
+                </div>
+              </div>
+            );
+          })}
+        </div>
         </div>
       </main>
       {inputDebugEnabled && inputProbe && (

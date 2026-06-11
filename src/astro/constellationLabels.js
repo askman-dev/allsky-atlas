@@ -25,82 +25,85 @@ export function getPolygonPath(polygon) {
     .join(' ')} Z`;
 }
 
-function boundaryPointVisible(point, limitDec, isNorth) {
-  return isNorth ? point.dec >= limitDec : point.dec <= limitDec;
+const boundaryPointKey = (point) => `${point.ra.toFixed(4)},${point.dec.toFixed(4)}`;
+
+function normalizeRa(ra, centerRa) {
+  let normalized = ra;
+  while (normalized - centerRa > 180) normalized -= 360;
+  while (normalized - centerRa < -180) normalized += 360;
+  return normalized;
 }
 
-function sphericalDistance(a, b) {
-  const deltaRa = Math.min(Math.abs(a.ra - b.ra), 360 - Math.abs(a.ra - b.ra));
+function getCircularMeanRa(points) {
+  const sum = points.reduce((acc, point) => {
+    const radians = point.ra * Math.PI / 180;
+    acc.x += Math.cos(radians);
+    acc.y += Math.sin(radians);
+    return acc;
+  }, { x: 0, y: 0 });
+
+  const angle = Math.atan2(sum.y, sum.x) * 180 / Math.PI;
+  return angle < 0 ? angle + 360 : angle;
+}
+
+function planarBoundaryDistance(a, b) {
+  const deltaRa = a.unwrappedRa - b.unwrappedRa;
   const midDec = ((a.dec + b.dec) / 2) * Math.PI / 180;
   return Math.hypot(deltaRa * Math.cos(midDec), a.dec - b.dec);
 }
 
-function getClosedPath(points) {
-  return `${points
-    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
-    .join(' ')} Z`;
+function getOrderedBoundaryPoints(points) {
+  const uniquePoints = [...new Map(points.map((point) => [boundaryPointKey(point), point])).values()];
+  if (uniquePoints.length < 3) return [];
+
+  const centerRa = getCircularMeanRa(uniquePoints);
+  const unvisited = uniquePoints.map((point) => ({
+    ...point,
+    unwrappedRa: normalizeRa(point.ra, centerRa),
+  }));
+
+  unvisited.sort((a, b) => a.unwrappedRa - b.unwrappedRa || a.dec - b.dec);
+  const path = [unvisited.shift()];
+
+  while (unvisited.length > 0) {
+    const head = path[0];
+    const tail = path[path.length - 1];
+    let best = null;
+
+    for (let i = 0; i < unvisited.length; i++) {
+      const point = unvisited[i];
+      const headDistance = planarBoundaryDistance(head, point);
+      const tailDistance = planarBoundaryDistance(tail, point);
+      const distance = Math.min(headDistance, tailDistance);
+
+      if (!best || distance < best.distance) {
+        best = {
+          index: i,
+          prepend: headDistance < tailDistance,
+          distance,
+        };
+      }
+    }
+
+    const [nextPoint] = unvisited.splice(best.index, 1);
+    if (best.prepend) {
+      path.unshift(nextPoint);
+    } else {
+      path.push(nextPoint);
+    }
+  }
+
+  return path;
 }
 
 export function getProjectedBoundaryFillPaths(points, projectFn, limitDec, isNorth) {
-  const paths = [];
-  let chain = [];
-
-  const flushChain = () => {
-    if (chain.length < 2) {
-      chain = [];
-      return;
-    }
-
-    const sideA = chain.map((pair) => projectFn(pair[0].ra, pair[0].dec));
-    const sideB = chain
-      .map((pair) => projectFn(pair[1].ra, pair[1].dec))
-      .reverse();
-    paths.push(getClosedPath([...sideA, ...sideB]));
-    chain = [];
-  };
-
-  const appendPair = (pair) => {
-    if (chain.length === 0) {
-      chain.push(pair);
-      return;
-    }
-
-    const previous = chain[chain.length - 1];
-    const sameOrderBridge = Math.max(
-      sphericalDistance(previous[0], pair[0]),
-      sphericalDistance(previous[1], pair[1])
-    );
-    const crossedOrderBridge = Math.max(
-      sphericalDistance(previous[0], pair[1]),
-      sphericalDistance(previous[1], pair[0])
-    );
-
-    if (Math.min(sameOrderBridge, crossedOrderBridge) > 25) {
-      flushChain();
-      chain.push(pair);
-      return;
-    }
-
-    chain.push(sameOrderBridge <= crossedOrderBridge ? pair : [pair[1], pair[0]]);
-  };
-
-  for (let i = 0; i + 1 < points.length; i += 2) {
-    const pair = [points[i], points[i + 1]];
-    if (!pair.every((point) => boundaryPointVisible(point, limitDec, isNorth))) {
-      flushChain();
-      continue;
-    }
-
-    if (sphericalDistance(pair[0], pair[1]) <= 0.2) {
-      flushChain();
-      continue;
-    }
-
-    appendPair(pair);
+  if (!points.some((point) => isNorth ? point.dec >= limitDec : point.dec <= limitDec)) {
+    return [];
   }
-  flushChain();
 
-  return paths;
+  const polygon = getOrderedBoundaryPoints(points).map((point) => projectFn(point.ra, point.dec));
+  const path = getPolygonPath(polygon);
+  return path ? [path] : [];
 }
 
 export function isPointInPolygon(point, polygon) {

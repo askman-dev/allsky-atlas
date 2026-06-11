@@ -176,9 +176,9 @@ export function resolveLabels(labels, mapRadius, starPoints = []) {
       height = 12;
     } else {
       // Star proper name
-      fontSize = 4.25;
-      width = charCount * 2.75 + 2;
-      height = 5;
+      fontSize = 8;
+      width = charCount * 5.2 + 4;
+      height = 9.5;
     }
 
     if (label.type === 'constellation' && label.constrainPolygon?.length >= 3) {
