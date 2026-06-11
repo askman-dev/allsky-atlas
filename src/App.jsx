@@ -9,6 +9,58 @@ import {
 import { THEMES, getStarColorHSL } from './themes/styles';
 import { resolveLabels } from './labels/collision';
 
+const MAG_RANGE_MIN = -2.0;
+const MAG_RANGE_MAX = 6.5;
+const MAG_RANGE_STEP = 0.5;
+const BOUNDARY_MAX_SEGMENT_DEG = 2.25;
+const BOUNDARY_LOOKAHEAD = 8;
+
+const sphericalSegmentDistance = (a, b) => {
+  const deltaRa = Math.min(Math.abs(a.ra - b.ra), 360 - Math.abs(a.ra - b.ra));
+  const midDec = ((a.dec + b.dec) / 2) * Math.PI / 180;
+  const projectedRa = deltaRa * Math.cos(midDec);
+  return Math.hypot(projectedRa, a.dec - b.dec);
+};
+
+const boundaryPointKey = (pt) => `${pt.ra.toFixed(3)},${pt.dec.toFixed(3)}`;
+
+const buildBoundarySegments = (boundaries) => {
+  const seen = new Set();
+  const segments = [];
+
+  for (const points of Object.values(boundaries)) {
+    const sorted = [...points].sort((a, b) => a.ra - b.ra || a.dec - b.dec);
+
+    for (let i = 0; i < sorted.length; i++) {
+      let bestCandidate = null;
+      const searchEnd = Math.min(sorted.length, i + 1 + BOUNDARY_LOOKAHEAD);
+
+      for (let j = i + 1; j < searchEnd; j++) {
+        const distance = sphericalSegmentDistance(sorted[i], sorted[j]);
+        if (
+          distance > 0.001 &&
+          distance <= BOUNDARY_MAX_SEGMENT_DEG &&
+          (!bestCandidate || distance < bestCandidate.distance)
+        ) {
+          bestCandidate = { point: sorted[j], distance };
+        }
+      }
+
+      if (!bestCandidate) continue;
+
+      const aKey = boundaryPointKey(sorted[i]);
+      const bKey = boundaryPointKey(bestCandidate.point);
+      const segmentKey = [aKey, bKey].sort().join('|');
+      if (seen.has(segmentKey)) continue;
+
+      seen.add(segmentKey);
+      segments.push([sorted[i], bestCandidate.point]);
+    }
+  }
+
+  return segments;
+};
+
 function App() {
   // --- State Variables ---
   const [stars, setStars] = useState([]);
@@ -18,6 +70,14 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  const previewAreaRef = useRef(null);
+  const posterMockupRef = useRef(null);
+  const transformRef = useRef({ scale: 1, x: 0, y: 0 });
+  const dragStateRef = useRef(null);
+  const activePointersRef = useRef(new Map());
+  const pinchStateRef = useRef(null);
+  const gestureStateRef = useRef(null);
+  const transformFrameRef = useRef(null);
 
   // --- Poster & Layout Settings ---
   const [title, setTitle] = useState("ALL-SKY CELESTIAL ATLAS");
@@ -28,6 +88,7 @@ function App() {
 
   // --- Astronomical Settings ---
   const [projection, setProjection] = useState("polar_equidistant"); // "polar_equidistant" or "polar_stereographic"
+  const [minMagLimit, setMinMagLimit] = useState(MAG_RANGE_MIN);
   const [magLimit, setMagLimit] = useState(6.0);
   const [overlapDec, setOverlapDec] = useState(55); // boundary dec angle (overlap up to Dec +/- 55)
   const [northRotation, setNorthRotation] = useState(0); // rotation in degrees
@@ -148,6 +209,8 @@ function App() {
     return centers;
   }, [chineseConstellations, starsMap]);
 
+  const boundarySegments = useMemo(() => buildBoundarySegments(boundaries), [boundaries]);
+
   // --- Top Brightest Stars list for Poster Table ---
   const brightestStars = useMemo(() => {
     if (stars.length === 0) return [];
@@ -175,12 +238,192 @@ function App() {
     return `${sign}${degrees.toString().padStart(2, '0')}°${minutes.toString().padStart(2, '0')}'`;
   };
 
-  // --- Radius of the main circular spheres ---
+  // --- Poster dimensions and radius of the main circular spheres ---
+  const POSTER_WIDTH = 1700;
+  const POSTER_HEIGHT = 1200;
   const R = 330;
 
   // --- Projection Functions ---
   const projectN = (ra, dec) => projectNorth(ra, dec, R, projection, -overlapDec, northRotation);
   const projectS = (ra, dec) => projectSouth(ra, dec, R, projection, overlapDec, southRotation);
+  const isMagnitudeVisible = (star) => star.mag >= minMagLimit && star.mag <= magLimit;
+
+  const updateMinMagLimit = (value) => {
+    setMinMagLimit(Math.min(value, magLimit));
+  };
+
+  const updateMagLimit = (value) => {
+    setMagLimit(value);
+    setMinMagLimit((current) => Math.min(current, value));
+  };
+
+  const magRangeStart = ((minMagLimit - MAG_RANGE_MIN) / (MAG_RANGE_MAX - MAG_RANGE_MIN)) * 100;
+  const magRangeEnd = ((magLimit - MAG_RANGE_MIN) / (MAG_RANGE_MAX - MAG_RANGE_MIN)) * 100;
+
+  const clampZoom = (value) => Math.max(0.45, Math.min(6, value));
+
+  const applyPreviewTransform = () => {
+    transformFrameRef.current = null;
+    if (!posterMockupRef.current) return;
+    const { x, y, scale } = transformRef.current;
+    posterMockupRef.current.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  };
+
+  const schedulePreviewTransform = () => {
+    if (transformFrameRef.current !== null) return;
+    transformFrameRef.current = requestAnimationFrame(applyPreviewTransform);
+  };
+
+  const zoomPreviewAt = (clientX, clientY, nextScale) => {
+    const previewRect = previewAreaRef.current?.getBoundingClientRect();
+    if (!previewRect) return;
+
+    const current = transformRef.current;
+    const clampedScale = clampZoom(nextScale);
+    const scaleRatio = clampedScale / current.scale;
+    const centerX = previewRect.left + previewRect.width / 2;
+    const centerY = previewRect.top + previewRect.height / 2;
+
+    transformRef.current = {
+      scale: clampedScale,
+      x: clientX - centerX - (clientX - centerX - current.x) * scaleRatio,
+      y: clientY - centerY - (clientY - centerY - current.y) * scaleRatio,
+    };
+    schedulePreviewTransform();
+  };
+
+  const getPinchMetrics = (pointers) => {
+    const [a, b] = pointers;
+    const centerX = (a.clientX + b.clientX) / 2;
+    const centerY = (a.clientY + b.clientY) / 2;
+    const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    return { centerX, centerY, distance };
+  };
+
+  useEffect(() => {
+    const previewArea = previewAreaRef.current;
+    if (!previewArea) return undefined;
+
+    const handleGestureStart = (event) => {
+      event.preventDefault();
+      gestureStateRef.current = {
+        originScale: transformRef.current.scale,
+      };
+    };
+
+    const handleGestureChange = (event) => {
+      event.preventDefault();
+      const previewRect = previewArea.getBoundingClientRect();
+      const clientX = event.clientX || previewRect.left + previewRect.width / 2;
+      const clientY = event.clientY || previewRect.top + previewRect.height / 2;
+      const originScale = gestureStateRef.current?.originScale || transformRef.current.scale;
+      zoomPreviewAt(clientX, clientY, originScale * event.scale);
+    };
+
+    const handleGestureEnd = () => {
+      gestureStateRef.current = null;
+    };
+
+    previewArea.addEventListener('gesturestart', handleGestureStart);
+    previewArea.addEventListener('gesturechange', handleGestureChange);
+    previewArea.addEventListener('gestureend', handleGestureEnd);
+
+    return () => {
+      previewArea.removeEventListener('gesturestart', handleGestureStart);
+      previewArea.removeEventListener('gesturechange', handleGestureChange);
+      previewArea.removeEventListener('gestureend', handleGestureEnd);
+      if (transformFrameRef.current !== null) {
+        cancelAnimationFrame(transformFrameRef.current);
+      }
+    };
+  }, []);
+
+  const handlePreviewWheel = (event) => {
+    if (!event.ctrlKey && Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      event.preventDefault();
+      return;
+    }
+
+    event.preventDefault();
+    const zoomDelta = Math.exp(-event.deltaY * 0.0012);
+    zoomPreviewAt(event.clientX, event.clientY, transformRef.current.scale * zoomDelta);
+  };
+
+  const handlePreviewPointerDown = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    activePointersRef.current.set(event.pointerId, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+
+    const pointers = [...activePointersRef.current.values()];
+    if (pointers.length >= 2) {
+      const pinch = getPinchMetrics(pointers.slice(0, 2));
+      pinchStateRef.current = {
+        ...pinch,
+        originScale: transformRef.current.scale,
+      };
+      dragStateRef.current = null;
+      return;
+    }
+
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: transformRef.current.x,
+      originY: transformRef.current.y,
+    };
+  };
+
+  const handlePreviewPointerMove = (event) => {
+    if (!activePointersRef.current.has(event.pointerId)) return;
+    activePointersRef.current.set(event.pointerId, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+
+    const pointers = [...activePointersRef.current.values()];
+    if (pointers.length >= 2 && pinchStateRef.current) {
+      const pinch = getPinchMetrics(pointers.slice(0, 2));
+      if (pinch.distance > 0) {
+        const nextScale = pinchStateRef.current.originScale * (pinch.distance / pinchStateRef.current.distance);
+        zoomPreviewAt(pinch.centerX, pinch.centerY, nextScale);
+      }
+      return;
+    }
+
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    transformRef.current = {
+      ...transformRef.current,
+      x: dragState.originX + event.clientX - dragState.startX,
+      y: dragState.originY + event.clientY - dragState.startY,
+    };
+    schedulePreviewTransform();
+  };
+
+  const handlePreviewPointerUp = (event) => {
+    activePointersRef.current.delete(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    const pointers = [...activePointersRef.current.values()];
+    pinchStateRef.current = null;
+    dragStateRef.current = null;
+
+    if (pointers.length === 1) {
+      dragStateRef.current = {
+        pointerId: [...activePointersRef.current.keys()][0],
+        startX: pointers[0].clientX,
+        startY: pointers[0].clientY,
+        originX: transformRef.current.x,
+        originY: transformRef.current.y,
+      };
+    }
+  };
 
   // --- Render Components inside SVG for a single Sphere ---
   const renderSphere = (isNorth) => {
@@ -191,7 +434,7 @@ function App() {
 
     // 1. Filter visible stars
     const visibleStars = stars.filter(s => {
-      if (s.mag > magLimit) return false;
+      if (!isMagnitudeVisible(s)) return false;
       return isNorth ? s.dec >= limitDec : s.dec <= limitDec;
     });
 
@@ -237,6 +480,19 @@ function App() {
 
     const mwOuterPath = getRibbonPath(mwOuterPos, mwOuterNeg);
     const mwInnerPath = getRibbonPath(mwInnerPos, mwInnerNeg);
+
+    const boundaryPath = boundarySegments
+      .filter(([a, b]) => {
+        const aVisible = isNorth ? a.dec >= limitDec : a.dec <= limitDec;
+        const bVisible = isNorth ? b.dec >= limitDec : b.dec <= limitDec;
+        return aVisible || bVisible;
+      })
+      .map(([a, b]) => {
+        const p1 = projectFn(a.ra, a.dec);
+        const p2 = projectFn(b.ra, b.dec);
+        return `M ${p1.x.toFixed(2)} ${p1.y.toFixed(2)} L ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+      })
+      .join(' ');
 
     // 7. Labels Processing with Collision Avoidance
     const labelCandidates = [];
@@ -445,22 +701,19 @@ function App() {
             />
           )}
 
-          {/* Constellation Boundaries */}
-          {showWesternBoundaries && showWesternLines && Object.entries(boundaries).map(([abbr, pts]) => {
-            // Project all boundary points
-            const projectedPts = pts.map(pt => projectFn(pt.ra, pt.dec));
-            const pointsString = projectedPts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
-            return (
-              <polygon
-                key={`bound-${abbr}`}
-                points={pointsString}
-                fill="none"
-                stroke={activeTheme.constellations.boundary}
-                strokeWidth="0.7"
-                strokeDasharray={activeTheme.constellations.boundaryDash}
-              />
-            );
-          })}
+          {/* IAU constellation boundaries: render reconstructed short boundary segments, not closed polygons. */}
+          {showWesternBoundaries && boundaryPath && (
+            <path
+              d={boundaryPath}
+              fill="none"
+              stroke={activeTheme.constellations.boundary}
+              strokeWidth="0.55"
+              strokeDasharray={activeTheme.constellations.boundaryDash}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.7"
+            />
+          )}
 
           {/* Chinese Asterisms Lines */}
           {showChineseLines && chineseConstellations.map((ast, idx) => {
@@ -468,8 +721,7 @@ function App() {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
               if (!s1 || !s2) return null;
-              // Check if both within magnitude limit and sphere
-              if (s1.mag > magLimit || s2.mag > magLimit) return null;
+              if (!isMagnitudeVisible(s1) || !isMagnitudeVisible(s2)) return null;
               const pt1 = projectFn(s1.ra, s1.dec);
               const pt2 = projectFn(s2.ra, s2.dec);
               return (
@@ -493,7 +745,7 @@ function App() {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
               if (!s1 || !s2) return null;
-              if (s1.mag > magLimit || s2.mag > magLimit) return null;
+              if (!isMagnitudeVisible(s1) || !isMagnitudeVisible(s2)) return null;
               const pt1 = projectFn(s1.ra, s1.dec);
               const pt2 = projectFn(s2.ra, s2.dec);
               return (
@@ -655,9 +907,9 @@ function App() {
 
     setTimeout(() => {
       try {
-        const scale = 3.5; // 3.5x scale -> 4200 x 5950 pixels (perfect for standard high-quality A1/A0 printing!)
-        const width = 1200 * scale;
-        const height = 1700 * scale;
+        const scale = 3.5; // 3.5x scale for print-quality landscape export.
+        const width = POSTER_WIDTH * scale;
+        const height = POSTER_HEIGHT * scale;
 
         const canvas = document.createElement('canvas');
         canvas.width = width;
@@ -708,6 +960,20 @@ function App() {
       </div>
     );
   }
+
+  const ToggleRow = ({ checked, onChange, children, indented = false, muted = false }) => (
+    <label className="toggle-row" style={indented ? { paddingLeft: '14px' } : undefined}>
+      <span style={muted ? { opacity: 0.8 } : undefined}>{children}</span>
+      <span className="switch">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span className="slider-switch"></span>
+      </span>
+    </label>
+  );
 
   return (
     <div className="app-container">
@@ -799,17 +1065,45 @@ function App() {
             </div>
             <div className="form-field">
               <label>
-                恒星星等极限限制 <span className="value">{magLimit.toFixed(1)}m</span>
+                星等过滤范围 <span className="value">{minMagLimit.toFixed(1)}m - {magLimit.toFixed(1)}m</span>
               </label>
-              <input
-                type="range"
-                className="slider-input"
-                min="3.0"
-                max="6.5"
-                step="0.5"
-                value={magLimit}
-                onChange={(e) => setMagLimit(parseFloat(e.target.value))}
-              />
+              <div className="range-caption">
+                <span>最亮端</span>
+                <span>最暗端</span>
+              </div>
+              <div
+                className="dual-range"
+                style={{
+                  '--range-start': `${magRangeStart}%`,
+                  '--range-end': `${magRangeEnd}%`,
+                }}
+              >
+                <input
+                  type="range"
+                  className="dual-range-input"
+                  min={MAG_RANGE_MIN}
+                  max={MAG_RANGE_MAX}
+                  step={MAG_RANGE_STEP}
+                  value={minMagLimit}
+                  aria-label="最亮端星等"
+                  onChange={(e) => updateMinMagLimit(parseFloat(e.target.value))}
+                />
+                <input
+                  type="range"
+                  className="dual-range-input"
+                  min={MAG_RANGE_MIN}
+                  max={MAG_RANGE_MAX}
+                  step={MAG_RANGE_STEP}
+                  value={magLimit}
+                  aria-label="最暗端星等"
+                  onChange={(e) => updateMagLimit(parseFloat(e.target.value))}
+                />
+              </div>
+              <div className="range-scale">
+                <span>{MAG_RANGE_MIN.toFixed(1)}m</span>
+                <span>越小越亮，越大越暗</span>
+                <span>{MAG_RANGE_MAX.toFixed(1)}m</span>
+              </div>
             </div>
             <div className="form-field">
               <label>
@@ -859,30 +1153,19 @@ function App() {
           <div className="control-group">
             <h3 className="control-group-title">星空图层显示开关</h3>
             
-            <div className="toggle-row" onClick={() => setShowWesternLines(!showWesternLines)}>
-              <span>现代西方星座连线</span>
-              <label className="switch">
-                <input type="checkbox" checked={showWesternLines} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showWesternLines} onChange={setShowWesternLines}>
+              现代西方星座连线
+            </ToggleRow>
+
+            <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
+              IAU 现代星座边界线
+            </ToggleRow>
 
             {showWesternLines && (
               <>
-                <div className="toggle-row" style={{ paddingLeft: '14px' }} onClick={() => setShowWesternBoundaries(!showWesternBoundaries)}>
-                  <span style={{ opacity: 0.8 }}>IAU 现代星座边界线</span>
-                  <label className="switch">
-                    <input type="checkbox" checked={showWesternBoundaries} readOnly />
-                    <span className="slider-switch"></span>
-                  </label>
-                </div>
-                <div className="toggle-row" style={{ paddingLeft: '14px' }} onClick={() => setShowWesternNames(!showWesternNames)}>
-                  <span style={{ opacity: 0.8 }}>星座名称文字标注</span>
-                  <label className="switch">
-                    <input type="checkbox" checked={showWesternNames} readOnly />
-                    <span className="slider-switch"></span>
-                  </label>
-                </div>
+                <ToggleRow checked={showWesternNames} onChange={setShowWesternNames} indented muted>
+                  星座名称文字标注
+                </ToggleRow>
                 {showWesternNames && (
                   <div className="form-field" style={{ paddingLeft: '14px' }}>
                     <select
@@ -900,66 +1183,41 @@ function App() {
               </>
             )}
 
-            <div className="toggle-row" onClick={() => {
-              setShowChineseLines(!showChineseLines);
-              setShowChineseNames(!showChineseLines); // toggle names too
-            }}>
-              <span>中国传统星官连线 (三垣二十八宿)</span>
-              <label className="switch">
-                <input type="checkbox" checked={showChineseLines} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow
+              checked={showChineseLines}
+              onChange={(checked) => {
+                setShowChineseLines(checked);
+                setShowChineseNames(checked);
+              }}
+            >
+              中国传统星官连线 (三垣二十八宿)
+            </ToggleRow>
 
             {showChineseLines && (
-              <div className="toggle-row" style={{ paddingLeft: '14px' }} onClick={() => setShowChineseNames(!showChineseNames)}>
-                <span style={{ opacity: 0.8 }}>星官中文名称标注</span>
-                <label className="switch">
-                  <input type="checkbox" checked={showChineseNames} readOnly />
-                  <span className="slider-switch"></span>
-                </label>
-              </div>
+              <ToggleRow checked={showChineseNames} onChange={setShowChineseNames} indented muted>
+                星官中文名称标注
+              </ToggleRow>
             )}
 
-            <div className="toggle-row" onClick={() => setShowGrid(!showGrid)}>
-              <span>赤经赤纬度网格经纬线</span>
-              <label className="switch">
-                <input type="checkbox" checked={showGrid} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showGrid} onChange={setShowGrid}>
+              赤经赤纬度网格经纬线
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowEquator(!showEquator)}>
-              <span>天球赤道圈 reference line</span>
-              <label className="switch">
-                <input type="checkbox" checked={showEquator} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showEquator} onChange={setShowEquator}>
+              天球赤道圈 reference line
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowEcliptic(!showEcliptic)}>
-              <span>黄道带轨道 (太阳周年视运动)</span>
-              <label className="switch">
-                <input type="checkbox" checked={showEcliptic} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showEcliptic} onChange={setShowEcliptic}>
+              黄道带轨道 (太阳周年视运动)
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowMilkyWay(!showMilkyWay)}>
-              <span>银道 Milky Way 银河带</span>
-              <label className="switch">
-                <input type="checkbox" checked={showMilkyWay} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showMilkyWay} onChange={setShowMilkyWay}>
+              银道 Milky Way 银河带
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowStarNames(!showStarNames)}>
-              <span>亮恒星名称标注 (e.g. 织女一/Vega)</span>
-              <label className="switch">
-                <input type="checkbox" checked={showStarNames} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showStarNames} onChange={setShowStarNames}>
+              亮恒星名称标注 (e.g. 织女一/Vega)
+            </ToggleRow>
           </div>
 
           {/* Export Actions */}
@@ -982,28 +1240,39 @@ function App() {
       </aside>
 
       {/* Main Preview Area */}
-      <main className="preview-area">
-        <div className="poster-mockup">
+      <main
+        ref={previewAreaRef}
+        className="preview-area"
+        onWheel={handlePreviewWheel}
+        onPointerDown={handlePreviewPointerDown}
+        onPointerMove={handlePreviewPointerMove}
+        onPointerUp={handlePreviewPointerUp}
+        onPointerCancel={handlePreviewPointerUp}
+      >
+        <div
+          ref={posterMockupRef}
+          className="poster-mockup"
+        >
           <div className="poster-svg-wrapper">
             {/* The absolute master SVG */}
             <svg
               id="poster-svg"
-              viewBox="0 0 1200 1700"
-              width="1200"
-              height="1700"
+              viewBox={`0 0 ${POSTER_WIDTH} ${POSTER_HEIGHT}`}
+              width={POSTER_WIDTH}
+              height={POSTER_HEIGHT}
               xmlns="http://www.w3.org/2000/svg"
             >
               {/* Poster Board Fill */}
-              <rect width="1200" height="1700" fill={activeTheme.posterBg} />
+              <rect width={POSTER_WIDTH} height={POSTER_HEIGHT} fill={activeTheme.posterBg} />
 
               {/* Decorative Poster Borders */}
               {/* Outer frame border */}
-              <rect x="25" y="25" width="1150" height="1650" fill="none" stroke={activeTheme.border} strokeWidth="3" />
+              <rect x="25" y="25" width={POSTER_WIDTH - 50} height={POSTER_HEIGHT - 50} fill="none" stroke={activeTheme.border} strokeWidth="3" />
               {/* Inner thin border */}
-              <rect x="33" y="33" width="1134" height="1634" fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+              <rect x="33" y="33" width={POSTER_WIDTH - 66} height={POSTER_HEIGHT - 66} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
 
               {/* Poster Title Block */}
-              <g transform="translate(600, 110)">
+              <g transform={`translate(${POSTER_WIDTH / 2}, 95)`}>
                 <text
                   x="0"
                   y="0"
@@ -1045,7 +1314,7 @@ function App() {
               </g>
 
               {/* 1. NORTHERN CELESTIAL ATMOSPHERE */}
-              <g transform="translate(600, 520)">
+              <g transform="translate(455, 525)">
                 {renderSphere(true)}
                 <text
                   x="0"
@@ -1062,7 +1331,7 @@ function App() {
               </g>
 
               {/* 2. SOUTHERN CELESTIAL ATMOSPHERE */}
-              <g transform="translate(600, 1205)">
+              <g transform="translate(1245, 525)">
                 {renderSphere(false)}
                 <text
                   x="0"
@@ -1079,9 +1348,9 @@ function App() {
               </g>
 
               {/* Poster Bottom Info: Legend & Stars Catalog Table */}
-              <g transform="translate(80, 1575)">
+              <g transform="translate(90, 1025)">
                 {/* Divider Line */}
-                <line x1="0" y1="-10" x2="1040" y2="-10" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
+                <line x1="0" y1="-10" x2="1520" y2="-10" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
 
                 {/* Left side: Legend */}
                 <g transform="translate(15, 10)">
@@ -1143,7 +1412,7 @@ function App() {
                 </g>
 
                 {/* Right side: Stars Catalog Table */}
-                <g transform="translate(720, 10)">
+                <g transform="translate(1040, 10)">
                   <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">BRIGHT CELESTIAL BODIES / 亮恒星星表</text>
                   
                   {/* Table Header */}
