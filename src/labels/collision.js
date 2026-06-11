@@ -138,7 +138,12 @@ function getPolygonLabelCandidates(label, width, height) {
  * @param {Array} starPoints List of coordinates {x, y, r} of stars, which labels should avoid covering.
  * @returns {Array} List of labels that should be rendered, with their resolved {x, y, textAnchor} position.
  */
-export function resolveLabels(labels, mapRadius, starPoints = []) {
+export function resolveLabels(labels, mapRadius, starPoints = [], typography = {}) {
+  const typeSize = {
+    constellation: typography.constellationLabel ?? 11,
+    chinese_asterism: typography.chineseAsterismLabel ?? 10,
+    star: typography.starLabel ?? 8,
+  };
   const placedBoxes = [];
   const result = [];
 
@@ -167,25 +172,25 @@ export function resolveLabels(labels, mapRadius, starPoints = []) {
     let fontSize;
 
     if (label.type === 'constellation') {
-      fontSize = 11;
-      width = charCount * 7.5 + 8;
-      height = 13;
+      fontSize = typeSize.constellation;
+      width = charCount * fontSize * 0.68 + fontSize * 0.73;
+      height = fontSize * 1.18;
     } else if (label.type === 'chinese_asterism') {
-      fontSize = 10;
-      width = charCount * 10 + 6;
-      height = 12;
+      fontSize = typeSize.chinese_asterism;
+      width = charCount * fontSize + fontSize * 0.6;
+      height = fontSize * 1.2;
     } else {
       // Star proper name
-      fontSize = 8;
-      width = charCount * 5.2 + 4;
-      height = 9.5;
+      fontSize = typeSize.star;
+      width = charCount * fontSize * 0.65 + fontSize * 0.5;
+      height = fontSize * 1.19;
     }
 
     if (label.type === 'constellation' && label.constrainPolygon?.length >= 3) {
-      for (let candidateFontSize = 11; candidateFontSize >= 4; candidateFontSize--) {
-        const scale = candidateFontSize / 11;
-        const candidateWidth = charCount * 7.5 * scale + 8 * scale;
-        const candidateHeight = 13 * scale;
+      const minConstellationSize = typography.minConstellationLabel ?? 4;
+      for (let candidateFontSize = fontSize; candidateFontSize >= minConstellationSize; candidateFontSize--) {
+        const candidateWidth = charCount * candidateFontSize * 0.68 + candidateFontSize * 0.73;
+        const candidateHeight = candidateFontSize * 1.18;
         const candidatesForSize = [
           getCenteredCandidate(label, candidateWidth, candidateHeight),
           ...getPolygonLabelCandidates(label, candidateWidth, candidateHeight),

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useTransition } from 'react';
 import {
   projectNorth,
   projectSouth,
@@ -11,7 +11,7 @@ import {
   getProjectedBoundaryPolygon,
   getVisualBoundaryLabelPoint,
 } from './astro/constellationLabels';
-import { THEMES, getStarColorHSL } from './themes/styles';
+import { THEMES, DEFAULT_TYPOGRAPHY, getStarColorHSL } from './themes/styles';
 import { resolveLabels } from './labels/collision';
 
 const MAG_RANGE_MIN = 0;
@@ -44,6 +44,7 @@ const CONSTELLATION_FILL_PALETTE = [
   '#66c2a5',
   '#e78ac3',
 ];
+const CSS_PX_PER_MM = 96 / 25.4;
 
 const getInitialLanguageMode = () => {
   if (typeof window === 'undefined') return 'en';
@@ -81,6 +82,7 @@ const UI_TEXT = {
     themeDeepSpace: 'Deep Space',
     themeElegantWhite: 'Elegant White',
     themeRetroParchment: 'Retro Parchment',
+    themeA4PrintColor: 'A4 Print Color',
     fontFamily: 'Font Family',
     fontSerif: 'Lora / Serif Classic',
     fontSans: 'Outfit / Sans Modern',
@@ -120,6 +122,9 @@ const UI_TEXT = {
     milkyWayBand: 'Milky Way Band',
     exportSvg: 'Export Vector SVG',
     exportPng: 'Export Print PNG',
+    actualSize: 'Actual Size',
+    fitView: 'Fit',
+    updatingPoster: 'Updating star map...',
     languageBoth: 'Chinese + English',
     languageZh: 'Chinese only',
     languageEn: 'English only',
@@ -145,6 +150,7 @@ const UI_TEXT = {
     themeDeepSpace: 'Deep Space (深空霓虹)',
     themeElegantWhite: 'Elegant White (极简黑白)',
     themeRetroParchment: 'Retro Parchment (齐锐版古风)',
+    themeA4PrintColor: 'A4 Print Color (A4 彩印清晰)',
     fontFamily: '字体族配置',
     fontSerif: 'Lora / 宋体 (衬线古典)',
     fontSans: 'Outfit / 黑体 (无衬线现代)',
@@ -184,6 +190,9 @@ const UI_TEXT = {
     milkyWayBand: '银河带',
     exportSvg: '导出无损矢量 SVG',
     exportPng: '导出印刷级高清 PNG',
+    actualSize: '真实尺寸',
+    fitView: '适应窗口',
+    updatingPoster: '正在重绘星图...',
     languageBoth: '中文 + English',
     languageZh: '仅中文',
     languageEn: 'English only',
@@ -371,6 +380,9 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  const [isPosterRendering, setIsPosterRendering] = useState(false);
+  const [posterRenderMessage, setPosterRenderMessage] = useState('');
+  const [, startPosterTransition] = useTransition();
   const previewAreaRef = useRef(null);
   const posterMockupRef = useRef(null);
   const transformRef = useRef({ scale: 1, x: 0, y: 0 });
@@ -381,6 +393,8 @@ function App() {
   const lastInputPointRef = useRef(null);
   const transformFrameRef = useRef(null);
   const interactionEndTimerRef = useRef(null);
+  const renderNoticeTimerRef = useRef(null);
+  const renderNoticeFrameRef = useRef(null);
   const isPreviewInteractingRef = useRef(false);
   const inputDebugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debugInput') === '1';
   const [inputProbe, setInputProbe] = useState(null);
@@ -421,11 +435,54 @@ function App() {
   const [showMilkyWay, setShowMilkyWay] = useState(true);
   const [showStarNames, setShowStarNames] = useState(true);
 
+  const hidePosterRenderNoticeSoon = () => {
+    if (renderNoticeTimerRef.current !== null) {
+      clearTimeout(renderNoticeTimerRef.current);
+    }
+
+    renderNoticeTimerRef.current = window.setTimeout(() => {
+      renderNoticeTimerRef.current = null;
+      setIsPosterRendering(false);
+    }, 240);
+  };
+
+  const schedulePosterUpdate = (update) => {
+    if (renderNoticeTimerRef.current !== null) {
+      clearTimeout(renderNoticeTimerRef.current);
+      renderNoticeTimerRef.current = null;
+    }
+    if (renderNoticeFrameRef.current !== null) {
+      cancelAnimationFrame(renderNoticeFrameRef.current);
+    }
+
+    setPosterRenderMessage(uiText.updatingPoster);
+    setIsPosterRendering(true);
+
+    renderNoticeFrameRef.current = requestAnimationFrame(() => {
+      renderNoticeFrameRef.current = requestAnimationFrame(() => {
+        renderNoticeFrameRef.current = null;
+        startPosterTransition(() => {
+          update();
+        });
+        requestAnimationFrame(hidePosterRenderNoticeSoon);
+      });
+    });
+  };
+
   useEffect(() => {
     const url = new URL(window.location.href);
     url.searchParams.set('hl', labelLanguageMode);
     window.history.replaceState(null, '', url);
   }, [labelLanguageMode]);
+
+  useEffect(() => () => {
+    if (renderNoticeTimerRef.current !== null) {
+      clearTimeout(renderNoticeTimerRef.current);
+    }
+    if (renderNoticeFrameRef.current !== null) {
+      cancelAnimationFrame(renderNoticeFrameRef.current);
+    }
+  }, []);
 
   // --- Fetch Data ---
   useEffect(() => {
@@ -463,8 +520,13 @@ function App() {
 
   // --- Active Theme ---
   const activeTheme = useMemo(() => THEMES[themeId] || THEMES.classic_navy, [themeId]);
-  const posterBackgroundColor = transparentBackground ? 'none' : activeTheme.posterBg;
-  const sphereBackgroundColor = transparentBackground ? 'none' : activeTheme.background;
+  const activeTypography = useMemo(() => ({
+    ...DEFAULT_TYPOGRAPHY,
+    ...(activeTheme.typography || {}),
+  }), [activeTheme]);
+  const hasTransparentPaper = transparentBackground || activeTheme.paperTransparent;
+  const posterBackgroundColor = hasTransparentPaper ? 'none' : activeTheme.posterBg;
+  const sphereBackgroundColor = hasTransparentPaper ? 'none' : activeTheme.background;
 
   // --- Fast Lookup Dictionary for Stars ---
   const starsMap = useMemo(() => {
@@ -612,12 +674,16 @@ function App() {
   const isStarVisible = (star) => constellationStarHips.has(star.hip) || isMagnitudeVisible(star);
 
   const updateMinMagLimit = (value) => {
-    setMinMagLimit(Math.min(value, magLimit));
+    schedulePosterUpdate(() => {
+      setMinMagLimit(Math.min(value, magLimit));
+    });
   };
 
   const updateMagLimit = (value) => {
-    setMagLimit(value);
-    setMinMagLimit((current) => Math.min(current, value));
+    schedulePosterUpdate(() => {
+      setMagLimit(value);
+      setMinMagLimit((current) => Math.min(current, value));
+    });
   };
 
   const magRangeStart = ((minMagLimit - MAG_RANGE_MIN) / (MAG_RANGE_MAX - MAG_RANGE_MIN)) * 100;
@@ -767,6 +833,9 @@ function App() {
 
     const handleNativePointerDown = (event) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (event.target?.closest?.('.preview-toolbar, button, input, select, textarea, label, a')) {
+        return;
+      }
 
       beginPreviewInteraction();
       const point = getLatestPointerPoint(event);
@@ -1083,6 +1152,40 @@ function App() {
     endPreviewInteractionSoon();
   };
 
+  const setPreviewTransform = (nextTransform) => {
+    transformRef.current = {
+      scale: clampZoom(nextTransform.scale),
+      x: nextTransform.x,
+      y: nextTransform.y,
+    };
+    schedulePreviewTransform();
+  };
+
+  const fitPreviewToWindow = () => {
+    setPreviewTransform({ scale: 1, x: 0, y: 0 });
+  };
+
+  const zoomPreviewToActualSize = () => {
+    const stage = posterMockupRef.current;
+    if (!stage) return;
+
+    const visibleMockup = stage.querySelector('.poster-mockup:not(.is-hidden)');
+    if (!visibleMockup) return;
+
+    const layout = posterLayout === 'landscape_dual'
+      ? { widthMm: 297 }
+      : { widthMm: 210 };
+    const targetCssWidth = layout.widthMm * CSS_PX_PER_MM;
+    const layoutWidth = visibleMockup.offsetWidth || visibleMockup.getBoundingClientRect().width;
+    if (!layoutWidth) return;
+
+    setPreviewTransform({
+      scale: targetCssWidth / layoutWidth,
+      x: 0,
+      y: 0,
+    });
+  };
+
   // --- Render Components inside SVG for a single Sphere ---
   const renderSphere = (isNorth, sphereRadius = POSTER_LAYOUTS.landscape_dual.sphereRadius, clipPrefix = '') => {
     const projectFn = isNorth
@@ -1175,7 +1278,23 @@ function App() {
         if (!inPrimaryHemisphere) continue;
 
         const boundaryPolygon = getProjectedBoundaryPolygon(boundaries[con.abbr] || [], projectFn, limitDec, isNorth);
-        const boundaryLabelPoint = getVisualBoundaryLabelPoint(boundaryPolygon);
+        const skeletonSegments = con.edges
+          .map(([hip1, hip2]) => {
+            const star1 = starsMap.get(hip1);
+            const star2 = starsMap.get(hip2);
+            if (!star1 || !star2) return null;
+
+            const star1Visible = isNorth ? star1.dec >= limitDec : star1.dec <= limitDec;
+            const star2Visible = isNorth ? star2.dec >= limitDec : star2.dec <= limitDec;
+            if (!star1Visible && !star2Visible) return null;
+
+            return [
+              projectFn(star1.ra, star1.dec),
+              projectFn(star2.ra, star2.dec),
+            ];
+          })
+          .filter(Boolean);
+        const boundaryLabelPoint = getVisualBoundaryLabelPoint(boundaryPolygon, skeletonSegments);
         const centerInSphere = center && (isNorth ? center.dec >= limitDec : center.dec <= limitDec);
         const pt = boundaryLabelPoint || (centerInSphere ? projectFn(center.ra, center.dec) : null);
 
@@ -1248,7 +1367,12 @@ function App() {
     }
 
     // Resolve labels
-    const resolvedLabels = resolveLabels(labelCandidates, sphereRadius, starPoints.filter(s => s.mag <= 2.5));
+    const resolvedLabels = resolveLabels(
+      labelCandidates,
+      sphereRadius,
+      starPoints.filter(s => s.mag <= 2.5),
+      activeTypography
+    );
 
     // 8. Ticks around the circle rim
     const ticks = [];
@@ -1488,6 +1612,8 @@ function App() {
                   r={s.r.toFixed(2)}
                   fill={color}
                   opacity={opacity}
+                  stroke={activeTheme.stars.stroke || 'none'}
+                  strokeWidth={activeTheme.stars.strokeWidth || 0}
                 />
               </g>
             );
@@ -1545,7 +1671,7 @@ function App() {
                 x={t.textX.toFixed(2)}
                 y={t.textY.toFixed(2)}
                 textAnchor="middle"
-                fontSize="8"
+                fontSize={activeTypography.tickLabel}
                 fontFamily={varFontPosterSans}
                 fill={activeTheme.grid.text}
                 fontWeight="500"
@@ -1696,12 +1822,13 @@ function App() {
               <select
                 className="select-input"
                 value={themeId}
-                onChange={(e) => setThemeId(e.target.value)}
+                onChange={(e) => schedulePosterUpdate(() => setThemeId(e.target.value))}
               >
                 <option value="classic_navy">{uiText.themeClassicNavy}</option>
                 <option value="deep_space">{uiText.themeDeepSpace}</option>
                 <option value="elegant_white">{uiText.themeElegantWhite}</option>
                 <option value="qirui_retro">{uiText.themeRetroParchment}</option>
+                <option value="a4_print_color">{uiText.themeA4PrintColor}</option>
               </select>
             </div>
             <div className="form-field">
@@ -1710,20 +1837,24 @@ function App() {
                 <button
                   type="button"
                   className={`segment-button ${posterLayout === 'landscape_dual' ? 'active' : ''}`}
-                  onClick={() => setPosterLayout('landscape_dual')}
+                  onClick={() => schedulePosterUpdate(() => setPosterLayout('landscape_dual'))}
                 >
                   {uiText.layoutLandscapeDual}
                 </button>
                 <button
                   type="button"
                   className={`segment-button ${posterLayout === 'portrait_single' ? 'active' : ''}`}
-                  onClick={() => setPosterLayout('portrait_single')}
+                  onClick={() => schedulePosterUpdate(() => setPosterLayout('portrait_single'))}
                 >
                   {uiText.layoutPortraitSingle}
                 </button>
               </div>
             </div>
-            <ToggleRow checked={transparentBackground} onChange={setTransparentBackground}>
+            <ToggleRow
+              checked={hasTransparentPaper}
+              onChange={(checked) => schedulePosterUpdate(() => setTransparentBackground(checked))}
+              muted={activeTheme.paperTransparent}
+            >
               {uiText.transparentBackground}
             </ToggleRow>
             <div className="form-field">
@@ -1731,7 +1862,7 @@ function App() {
               <select
                 className="select-input"
                 value={fontFamily}
-                onChange={(e) => setFontFamily(e.target.value)}
+                onChange={(e) => schedulePosterUpdate(() => setFontFamily(e.target.value))}
               >
                 <option value="serif">{uiText.fontSerif}</option>
                 <option value="sans">{uiText.fontSans}</option>
@@ -1742,7 +1873,7 @@ function App() {
               <select
                 className="select-input"
                 value={labelLanguageMode}
-                onChange={(e) => setLabelLanguageMode(e.target.value)}
+                onChange={(e) => schedulePosterUpdate(() => setLabelLanguageMode(e.target.value))}
               >
                 <option value="en">{uiText.languageEn}</option>
                 <option value="zh">{uiText.languageZh}</option>
@@ -1788,7 +1919,7 @@ function App() {
               <select
                 className="select-input"
                 value={projection}
-                onChange={(e) => setProjection(e.target.value)}
+                onChange={(e) => schedulePosterUpdate(() => setProjection(e.target.value))}
               >
                 <option value="polar_equidistant">{uiText.projectionEquidistant}</option>
                 <option value="polar_stereographic">{uiText.projectionStereographic}</option>
@@ -1805,7 +1936,7 @@ function App() {
                 max="40"
                 step="1"
                 value={overlapDec}
-                onChange={(e) => setOverlapDec(parseInt(e.target.value))}
+                onChange={(e) => schedulePosterUpdate(() => setOverlapDec(parseInt(e.target.value)))}
               />
             </div>
             <div className="form-field">
@@ -1819,7 +1950,7 @@ function App() {
                 max="360"
                 step="5"
                 value={northRotation}
-                onChange={(e) => setNorthRotation(parseInt(e.target.value))}
+                onChange={(e) => schedulePosterUpdate(() => setNorthRotation(parseInt(e.target.value)))}
               />
             </div>
             <div className="form-field">
@@ -1833,7 +1964,7 @@ function App() {
                 max="360"
                 step="5"
                 value={southRotation}
-                onChange={(e) => setSouthRotation(parseInt(e.target.value))}
+                onChange={(e) => schedulePosterUpdate(() => setSouthRotation(parseInt(e.target.value)))}
               />
             </div>
           </div>
@@ -1844,18 +1975,18 @@ function App() {
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
-              <ToggleRow checked={showWesternLines} onChange={setShowWesternLines}>
+              <ToggleRow checked={showWesternLines} onChange={(checked) => schedulePosterUpdate(() => setShowWesternLines(checked))}>
                 {uiText.constellationLines}
               </ToggleRow>
-              <ToggleRow checked={showWesternNames} onChange={setShowWesternNames}>
+              <ToggleRow checked={showWesternNames} onChange={(checked) => schedulePosterUpdate(() => setShowWesternNames(checked))}>
                 {uiText.constellationNames}
               </ToggleRow>
-              <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
+              <ToggleRow checked={showWesternBoundaries} onChange={(checked) => schedulePosterUpdate(() => setShowWesternBoundaries(checked))}>
                 {uiText.iauBoundaries}
               </ToggleRow>
               <ToggleRow
                 checked={showWesternBoundaryFills}
-                onChange={setShowWesternBoundaryFills}
+                onChange={(checked) => schedulePosterUpdate(() => setShowWesternBoundaryFills(checked))}
                 indented
                 muted={!showWesternBoundaries}
               >
@@ -1865,17 +1996,17 @@ function App() {
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.chineseAsterisms}</h4>
-              <ToggleRow checked={showChineseLines} onChange={setShowChineseLines}>
+              <ToggleRow checked={showChineseLines} onChange={(checked) => schedulePosterUpdate(() => setShowChineseLines(checked))}>
                 {uiText.asterismLines}
               </ToggleRow>
-              <ToggleRow checked={showChineseNames} onChange={setShowChineseNames}>
+              <ToggleRow checked={showChineseNames} onChange={(checked) => schedulePosterUpdate(() => setShowChineseNames(checked))}>
                 {uiText.asterismNames}
               </ToggleRow>
             </div>
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.starLabels}</h4>
-              <ToggleRow checked={showStarNames} onChange={setShowStarNames}>
+              <ToggleRow checked={showStarNames} onChange={(checked) => schedulePosterUpdate(() => setShowStarNames(checked))}>
                 {uiText.primaryStarNames}
               </ToggleRow>
             </div>
@@ -1928,16 +2059,16 @@ function App() {
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.referenceBackground}</h4>
-              <ToggleRow checked={showGrid} onChange={setShowGrid}>
+              <ToggleRow checked={showGrid} onChange={(checked) => schedulePosterUpdate(() => setShowGrid(checked))}>
                 {uiText.raDecGrid}
               </ToggleRow>
-              <ToggleRow checked={showEquator} onChange={setShowEquator}>
+              <ToggleRow checked={showEquator} onChange={(checked) => schedulePosterUpdate(() => setShowEquator(checked))}>
                 {uiText.celestialEquator}
               </ToggleRow>
-              <ToggleRow checked={showEcliptic} onChange={setShowEcliptic}>
+              <ToggleRow checked={showEcliptic} onChange={(checked) => schedulePosterUpdate(() => setShowEcliptic(checked))}>
                 {uiText.eclipticPath}
               </ToggleRow>
-              <ToggleRow checked={showMilkyWay} onChange={setShowMilkyWay}>
+              <ToggleRow checked={showMilkyWay} onChange={(checked) => schedulePosterUpdate(() => setShowMilkyWay(checked))}>
                 {uiText.milkyWayBand}
               </ToggleRow>
             </div>
@@ -1968,11 +2099,29 @@ function App() {
         className="preview-area"
         onWheelCapture={handlePreviewWheelCapture}
       >
+        <div className="preview-toolbar" aria-label="Preview scale controls">
+          <button type="button" className="preview-tool-button" onClick={zoomPreviewToActualSize}>
+            {uiText.actualSize}
+          </button>
+          <button type="button" className="preview-tool-button" onClick={fitPreviewToWindow}>
+            {uiText.fitView}
+          </button>
+        </div>
+        {isPosterRendering && (
+          <div className="preview-render-toast" role="status" aria-live="polite">
+            <span className="preview-render-spinner" aria-hidden="true"></span>
+            <span className="preview-render-text">{posterRenderMessage}</span>
+            <span className="preview-render-progress" aria-hidden="true"></span>
+          </div>
+        )}
         <div
           ref={posterMockupRef}
           className={`poster-preview-stage ${posterLayout === 'portrait_single' ? 'portrait-stage' : ''}`}
         >
-        <div className={`poster-mockup ${posterLayout !== 'landscape_dual' ? 'is-hidden' : ''}`}>
+        <div
+          className={`poster-mockup ${posterLayout !== 'landscape_dual' ? 'is-hidden' : ''}`}
+          style={hasTransparentPaper ? { backgroundColor: '#ffffff' } : undefined}
+        >
           <div className="poster-svg-wrapper">
             {/* The absolute master SVG */}
             <svg
@@ -2001,7 +2150,7 @@ function App() {
                   textAnchor="middle"
                   fill={activeTheme.text.title}
                   fontFamily={activePosterFont}
-                  fontSize="36"
+                  fontSize={activeTypography.titleLandscape}
                   fontWeight="bold"
                   letterSpacing="4"
                 >
@@ -2014,7 +2163,7 @@ function App() {
                   textAnchor="middle"
                   fill={activeTheme.text.body}
                   fontFamily={varFontPosterSans}
-                  fontSize="9.5"
+                  fontSize={activeTypography.noteLandscape}
                   fontWeight="500"
                   letterSpacing="2"
                   opacity="0.7"
@@ -2032,7 +2181,7 @@ function App() {
                   textAnchor="middle"
                   fill={activeTheme.text.title}
                   fontFamily={activePosterFont}
-                  fontSize="15"
+                  fontSize={activeTypography.hemisphereTitle}
                   fontWeight="bold"
                   letterSpacing="2.5"
                 >
@@ -2049,7 +2198,7 @@ function App() {
                   textAnchor="middle"
                   fill={activeTheme.text.title}
                   fontFamily={activePosterFont}
-                  fontSize="15"
+                  fontSize={activeTypography.hemisphereTitle}
                   fontWeight="bold"
                   letterSpacing="2.5"
                 >
@@ -2064,7 +2213,7 @@ function App() {
 
                 {/* Left side: Legend */}
                 <g transform="translate(15, 10)">
-                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">{getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}</text>
+                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.5">{getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}</text>
                   
                   {/* Star magnitude legend scales */}
                   <g transform="translate(0, 26)">
@@ -2081,16 +2230,16 @@ function App() {
                               <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
                             </g>
                           ) : (
-                            <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} />
+                            <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
                           )}
-                          <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.5">{mag.toFixed(0)}m</text>
+                          <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
                         </g>
                       );
                     })}
                   </g>
 
                   {/* References lines legend */}
-                  <g transform="translate(290, 10)" fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                  <g transform="translate(290, 10)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                     <g transform="translate(0, 0)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />
                       <text x="35" y="3.5">{getLocalizedText('天球赤道', 'Celestial Equator', 'en-first')}</text>
@@ -2105,7 +2254,7 @@ function App() {
                     </g>
                   </g>
                   
-                  <g transform="translate(485, 10)" fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                  <g transform="translate(485, 10)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                     <g transform="translate(0, 0)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.line} strokeWidth="1" opacity={activeTheme.constellations.lineOpacity} />
                       <text x="35" y="3.5">{getLocalizedText('星座连线', 'Constellation Line', 'en-first')}</text>
@@ -2123,11 +2272,11 @@ function App() {
 
                 {/* Source Code */}
                 <g transform="translate(15, 82)">
-                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="9.5" fontWeight="bold" letterSpacing="1.2">
+                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.legendBody} fontWeight="bold" letterSpacing="1.2">
                     {getLocalizedText('源代码', 'SOURCE CODE', 'en-first')}
                   </text>
                   <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
-                    <text x="0" y="15" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize="8.5" fontWeight="600">
+                    <text x="0" y="15" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize={activeTypography.legendBody} fontWeight="600">
                       github.com/askman-dev/allsky-atlas
                     </text>
                   </a>
@@ -2135,26 +2284,26 @@ function App() {
 
                 {/* Map Terms */}
                 <g transform="translate(290, 82)">
-                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="9.5" fontWeight="bold" letterSpacing="1.2">
+                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.legendBody} fontWeight="bold" letterSpacing="1.2">
                     {getLocalizedText('名词解释', 'MAP TERMS', 'en-first')}
                   </text>
-                  <text x="0" y="15" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.6">
+                  <text x="0" y="15" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
                     {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
                   </text>
-                  <text x="0" y="28" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.6">
+                  <text x="0" y="28" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
                     {getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')}
                   </text>
-                  <text x="0" y="41" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.6">
+                  <text x="0" y="41" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
                     {getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
                   </text>
                 </g>
 
                 {/* Right side: Stars Catalog Table */}
                 <g transform="translate(1040, 10)">
-                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">{getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}</text>
+                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.5">{getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}</text>
                   
                   {/* Table Header */}
-                  <g transform="translate(0, 20)" fontSize="8" fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
+                  <g transform="translate(0, 20)" fontSize={activeTypography.tableHeader} fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
                     <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
                     <text x="140" y="0">MAG</text>
                     <text x="180" y="0">R.A.</text>
@@ -2171,7 +2320,7 @@ function App() {
                                           star.colorIdx < 0.8 ? 'G' :
                                           star.colorIdx < 1.3 ? 'K' : 'M';
                     return (
-                      <g key={`table-row-${i}`} transform={`translate(0, ${y})`} fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                      <g key={`table-row-${i}`} transform={`translate(0, ${y})`} fontSize={activeTypography.tableBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                         <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
                         <text x="140" y="0">{star.mag.toFixed(2)}</text>
                         <text x="180" y="0">{formatRA(star.ra)}</text>
@@ -2193,7 +2342,11 @@ function App() {
               : getLocalizedText('南天恒星图', 'SOUTHERN CELESTIAL ATMOSPHERE', 'en-first');
 
             return (
-              <div className="poster-mockup portrait-mockup" key={suffix}>
+              <div
+                className="poster-mockup portrait-mockup"
+                key={suffix}
+                style={hasTransparentPaper ? { backgroundColor: '#ffffff' } : undefined}
+              >
                 <div className="poster-svg-wrapper">
                   <svg
                     id={`poster-svg-${suffix}`}
@@ -2215,7 +2368,7 @@ function App() {
                         textAnchor="middle"
                         fill={activeTheme.text.title}
                         fontFamily={activePosterFont}
-                        fontSize="32"
+                        fontSize={activeTypography.titlePortrait}
                         fontWeight="bold"
                         letterSpacing="3"
                       >
@@ -2228,7 +2381,7 @@ function App() {
                         textAnchor="middle"
                         fill={activeTheme.text.body}
                         fontFamily={varFontPosterSans}
-                        fontSize="8.5"
+                        fontSize={activeTypography.notePortrait}
                         fontWeight="500"
                         letterSpacing="1.5"
                         opacity="0.7"
@@ -2245,7 +2398,7 @@ function App() {
                         textAnchor="middle"
                         fill={activeTheme.text.title}
                         fontFamily={activePosterFont}
-                        fontSize="16"
+                        fontSize={activeTypography.hemisphereTitle}
                         fontWeight="bold"
                         letterSpacing="2.2"
                       >
@@ -2257,7 +2410,7 @@ function App() {
                       <line x1="0" y1="-12" x2="1040" y2="-12" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
 
                       <g transform="translate(0, 12)">
-                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.4">
+                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.4">
                           {getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}
                         </text>
                         <g transform="translate(0, 28)">
@@ -2274,14 +2427,14 @@ function App() {
                                     <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
                                   </g>
                                 ) : (
-                                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} />
+                                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
                                 )}
-                                <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.5">{mag.toFixed(0)}m</text>
+                                <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
                               </g>
                             );
                           })}
                         </g>
-                        <g transform="translate(0, 78)" fontSize="8.2" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                        <g transform="translate(0, 78)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                           <g transform="translate(0, 0)">
                             <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />
                             <text x="34" y="3.5">{getLocalizedText('天球赤道', 'Celestial Equator', 'en-first')}</text>
@@ -2298,29 +2451,29 @@ function App() {
                       </g>
 
                       <g transform="translate(0, 170)">
-                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="10" fontWeight="bold" letterSpacing="1.2">
+                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.legendBody} fontWeight="bold" letterSpacing="1.2">
                           {getLocalizedText('名词解释', 'MAP TERMS', 'en-first')}
                         </text>
-                        <text x="0" y="18" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="8">
+                        <text x="0" y="18" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
                           {isNorth
                             ? getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')
                             : getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
                         </text>
-                        <text x="0" y="34" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="8">
+                        <text x="0" y="34" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
                           {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
                         </text>
                         <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
-                          <text x="0" y="58" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize="8.5" fontWeight="600">
+                          <text x="0" y="58" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize={activeTypography.legendBody} fontWeight="600">
                             github.com/askman-dev/allsky-atlas
                           </text>
                         </a>
                       </g>
 
                       <g transform="translate(610, 12)">
-                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.4">
+                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.4">
                           {getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}
                         </text>
-                        <g transform="translate(0, 24)" fontSize="8" fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
+                        <g transform="translate(0, 24)" fontSize={activeTypography.tableHeader} fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
                           <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
                           <text x="132" y="0">MAG</text>
                           <text x="172" y="0">R.A.</text>
@@ -2336,7 +2489,7 @@ function App() {
                                                 star.colorIdx < 0.8 ? 'G' :
                                                 star.colorIdx < 1.3 ? 'K' : 'M';
                           return (
-                            <g key={`portrait-table-row-${suffix}-${i}`} transform={`translate(0, ${y})`} fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+                            <g key={`portrait-table-row-${suffix}-${i}`} transform={`translate(0, ${y})`} fontSize={activeTypography.tableBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                               <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
                               <text x="132" y="0">{star.mag.toFixed(2)}</text>
                               <text x="172" y="0">{formatRA(star.ra)}</text>

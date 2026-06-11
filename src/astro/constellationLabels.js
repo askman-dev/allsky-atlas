@@ -144,10 +144,8 @@ function distanceToPolygonEdge(point, polygon) {
   return minDistance;
 }
 
-export function getVisualBoundaryLabelPoint(polygon) {
-  if (polygon.length < 3) return null;
-
-  const bounds = polygon.reduce((acc, point) => ({
+function getBounds(points) {
+  return points.reduce((acc, point) => ({
     minX: Math.min(acc.minX, point.x),
     maxX: Math.max(acc.maxX, point.x),
     minY: Math.min(acc.minY, point.y),
@@ -158,6 +156,50 @@ export function getVisualBoundaryLabelPoint(polygon) {
     minY: Infinity,
     maxY: -Infinity,
   });
+}
+
+function distanceToSkeleton(point, skeletonSegments) {
+  if (!skeletonSegments?.length) return Infinity;
+  return Math.min(...skeletonSegments.map(([a, b]) => distanceToSegment(point, a, b)));
+}
+
+function getSkeletonBounds(skeletonSegments) {
+  const points = skeletonSegments.flatMap(([a, b]) => [a, b]);
+  return points.length > 0 ? getBounds(points) : null;
+}
+
+function getSkeletonLabelPoint(polygon, skeletonSegments) {
+  if (!skeletonSegments?.length) return null;
+
+  let bestPoint = null;
+  let bestScore = -Infinity;
+  const samples = [0.2, 0.35, 0.5, 0.65, 0.8];
+
+  for (const [a, b] of skeletonSegments) {
+    for (const t of samples) {
+      const candidate = {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+      };
+      if (!isPointInPolygon(candidate, polygon)) continue;
+
+      const edgeDistance = distanceToPolygonEdge(candidate, polygon);
+      const segmentLength = Math.hypot(b.x - a.x, b.y - a.y);
+      const score = edgeDistance + Math.min(segmentLength, 24) * 0.08;
+      if (score > bestScore) {
+        bestPoint = candidate;
+        bestScore = score;
+      }
+    }
+  }
+
+  return bestPoint;
+}
+
+export function getVisualBoundaryLabelPoint(polygon, skeletonSegments = []) {
+  if (polygon.length < 3) return null;
+
+  const bounds = getBounds(polygon);
 
   let bestPoint = null;
   let bestDistance = -Infinity;
@@ -178,6 +220,18 @@ export function getVisualBoundaryLabelPoint(polygon) {
         bestPoint = candidate;
         bestDistance = distance;
       }
+    }
+  }
+
+  const skeletonBounds = getSkeletonBounds(skeletonSegments);
+  if (bestPoint && skeletonBounds) {
+    const skeletonDiagonal = Math.hypot(
+      skeletonBounds.maxX - skeletonBounds.minX,
+      skeletonBounds.maxY - skeletonBounds.minY
+    );
+    const maxSkeletonDistance = Math.max(14, Math.min(30, skeletonDiagonal * 0.18));
+    if (distanceToSkeleton(bestPoint, skeletonSegments) > maxSkeletonDistance) {
+      return getSkeletonLabelPoint(polygon, skeletonSegments) || bestPoint;
     }
   }
 
