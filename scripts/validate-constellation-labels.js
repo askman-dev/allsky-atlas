@@ -52,9 +52,31 @@ function getConstellationCentroid(edges) {
   };
 }
 
-function getProjectedLabelPoint(con, polygon, projectFn, mode) {
+function getProjectedSkeletonSegments(con, projectFn, limitDec, isNorth) {
+  return con.edges
+    .map(([hip1, hip2]) => {
+      const star1 = starsByHip.get(hip1);
+      const star2 = starsByHip.get(hip2);
+      if (!star1 || !star2) return null;
+
+      const star1Visible = isNorth ? star1.dec >= limitDec : star1.dec <= limitDec;
+      const star2Visible = isNorth ? star2.dec >= limitDec : star2.dec <= limitDec;
+      if (!star1Visible && !star2Visible) return null;
+
+      return [
+        projectFn(star1.ra, star1.dec),
+        projectFn(star2.ra, star2.dec),
+      ];
+    })
+    .filter(Boolean);
+}
+
+function getProjectedLabelPoint(con, polygon, projectFn, mode, limitDec, isNorth) {
   if (mode === 'boundary') {
-    const point = getVisualBoundaryLabelPoint(polygon);
+    const point = getVisualBoundaryLabelPoint(
+      polygon,
+      getProjectedSkeletonSegments(con, projectFn, limitDec, isNorth)
+    );
     if (point) return point;
   }
 
@@ -108,7 +130,7 @@ function validateHemisphere(isNorth, mode, language) {
     const polygon = getProjectedBoundaryPolygon(boundaries[con.abbr] || [], projectFn, limitDec, isNorth);
     if (polygon.length < 3) continue;
 
-    const point = getProjectedLabelPoint(con, polygon, projectFn, mode);
+    const point = getProjectedLabelPoint(con, polygon, projectFn, mode, limitDec, isNorth);
     if (!point || Math.hypot(point.x, point.y) >= R - 15) continue;
 
     const id = `con-${con.abbr}`;

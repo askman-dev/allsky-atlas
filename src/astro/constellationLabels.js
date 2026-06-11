@@ -25,82 +25,85 @@ export function getPolygonPath(polygon) {
     .join(' ')} Z`;
 }
 
-function boundaryPointVisible(point, limitDec, isNorth) {
-  return isNorth ? point.dec >= limitDec : point.dec <= limitDec;
+const boundaryPointKey = (point) => `${point.ra.toFixed(4)},${point.dec.toFixed(4)}`;
+
+function normalizeRa(ra, centerRa) {
+  let normalized = ra;
+  while (normalized - centerRa > 180) normalized -= 360;
+  while (normalized - centerRa < -180) normalized += 360;
+  return normalized;
 }
 
-function sphericalDistance(a, b) {
-  const deltaRa = Math.min(Math.abs(a.ra - b.ra), 360 - Math.abs(a.ra - b.ra));
+function getCircularMeanRa(points) {
+  const sum = points.reduce((acc, point) => {
+    const radians = point.ra * Math.PI / 180;
+    acc.x += Math.cos(radians);
+    acc.y += Math.sin(radians);
+    return acc;
+  }, { x: 0, y: 0 });
+
+  const angle = Math.atan2(sum.y, sum.x) * 180 / Math.PI;
+  return angle < 0 ? angle + 360 : angle;
+}
+
+function planarBoundaryDistance(a, b) {
+  const deltaRa = a.unwrappedRa - b.unwrappedRa;
   const midDec = ((a.dec + b.dec) / 2) * Math.PI / 180;
   return Math.hypot(deltaRa * Math.cos(midDec), a.dec - b.dec);
 }
 
-function getClosedPath(points) {
-  return `${points
-    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
-    .join(' ')} Z`;
+function getOrderedBoundaryPoints(points) {
+  const uniquePoints = [...new Map(points.map((point) => [boundaryPointKey(point), point])).values()];
+  if (uniquePoints.length < 3) return [];
+
+  const centerRa = getCircularMeanRa(uniquePoints);
+  const unvisited = uniquePoints.map((point) => ({
+    ...point,
+    unwrappedRa: normalizeRa(point.ra, centerRa),
+  }));
+
+  unvisited.sort((a, b) => a.unwrappedRa - b.unwrappedRa || a.dec - b.dec);
+  const path = [unvisited.shift()];
+
+  while (unvisited.length > 0) {
+    const head = path[0];
+    const tail = path[path.length - 1];
+    let best = null;
+
+    for (let i = 0; i < unvisited.length; i++) {
+      const point = unvisited[i];
+      const headDistance = planarBoundaryDistance(head, point);
+      const tailDistance = planarBoundaryDistance(tail, point);
+      const distance = Math.min(headDistance, tailDistance);
+
+      if (!best || distance < best.distance) {
+        best = {
+          index: i,
+          prepend: headDistance < tailDistance,
+          distance,
+        };
+      }
+    }
+
+    const [nextPoint] = unvisited.splice(best.index, 1);
+    if (best.prepend) {
+      path.unshift(nextPoint);
+    } else {
+      path.push(nextPoint);
+    }
+  }
+
+  return path;
 }
 
 export function getProjectedBoundaryFillPaths(points, projectFn, limitDec, isNorth) {
-  const paths = [];
-  let chain = [];
-
-  const flushChain = () => {
-    if (chain.length < 2) {
-      chain = [];
-      return;
-    }
-
-    const sideA = chain.map((pair) => projectFn(pair[0].ra, pair[0].dec));
-    const sideB = chain
-      .map((pair) => projectFn(pair[1].ra, pair[1].dec))
-      .reverse();
-    paths.push(getClosedPath([...sideA, ...sideB]));
-    chain = [];
-  };
-
-  const appendPair = (pair) => {
-    if (chain.length === 0) {
-      chain.push(pair);
-      return;
-    }
-
-    const previous = chain[chain.length - 1];
-    const sameOrderBridge = Math.max(
-      sphericalDistance(previous[0], pair[0]),
-      sphericalDistance(previous[1], pair[1])
-    );
-    const crossedOrderBridge = Math.max(
-      sphericalDistance(previous[0], pair[1]),
-      sphericalDistance(previous[1], pair[0])
-    );
-
-    if (Math.min(sameOrderBridge, crossedOrderBridge) > 25) {
-      flushChain();
-      chain.push(pair);
-      return;
-    }
-
-    chain.push(sameOrderBridge <= crossedOrderBridge ? pair : [pair[1], pair[0]]);
-  };
-
-  for (let i = 0; i + 1 < points.length; i += 2) {
-    const pair = [points[i], points[i + 1]];
-    if (!pair.every((point) => boundaryPointVisible(point, limitDec, isNorth))) {
-      flushChain();
-      continue;
-    }
-
-    if (sphericalDistance(pair[0], pair[1]) <= 0.2) {
-      flushChain();
-      continue;
-    }
-
-    appendPair(pair);
+  if (!points.some((point) => isNorth ? point.dec >= limitDec : point.dec <= limitDec)) {
+    return [];
   }
-  flushChain();
 
-  return paths;
+  const polygon = getOrderedBoundaryPoints(points).map((point) => projectFn(point.ra, point.dec));
+  const path = getPolygonPath(polygon);
+  return path ? [path] : [];
 }
 
 export function isPointInPolygon(point, polygon) {
@@ -141,10 +144,8 @@ function distanceToPolygonEdge(point, polygon) {
   return minDistance;
 }
 
-export function getVisualBoundaryLabelPoint(polygon) {
-  if (polygon.length < 3) return null;
-
-  const bounds = polygon.reduce((acc, point) => ({
+function getBounds(points) {
+  return points.reduce((acc, point) => ({
     minX: Math.min(acc.minX, point.x),
     maxX: Math.max(acc.maxX, point.x),
     minY: Math.min(acc.minY, point.y),
@@ -155,6 +156,50 @@ export function getVisualBoundaryLabelPoint(polygon) {
     minY: Infinity,
     maxY: -Infinity,
   });
+}
+
+function distanceToSkeleton(point, skeletonSegments) {
+  if (!skeletonSegments?.length) return Infinity;
+  return Math.min(...skeletonSegments.map(([a, b]) => distanceToSegment(point, a, b)));
+}
+
+function getSkeletonBounds(skeletonSegments) {
+  const points = skeletonSegments.flatMap(([a, b]) => [a, b]);
+  return points.length > 0 ? getBounds(points) : null;
+}
+
+function getSkeletonLabelPoint(polygon, skeletonSegments) {
+  if (!skeletonSegments?.length) return null;
+
+  let bestPoint = null;
+  let bestScore = -Infinity;
+  const samples = [0.2, 0.35, 0.5, 0.65, 0.8];
+
+  for (const [a, b] of skeletonSegments) {
+    for (const t of samples) {
+      const candidate = {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+      };
+      if (!isPointInPolygon(candidate, polygon)) continue;
+
+      const edgeDistance = distanceToPolygonEdge(candidate, polygon);
+      const segmentLength = Math.hypot(b.x - a.x, b.y - a.y);
+      const score = edgeDistance + Math.min(segmentLength, 24) * 0.08;
+      if (score > bestScore) {
+        bestPoint = candidate;
+        bestScore = score;
+      }
+    }
+  }
+
+  return bestPoint;
+}
+
+export function getVisualBoundaryLabelPoint(polygon, skeletonSegments = []) {
+  if (polygon.length < 3) return null;
+
+  const bounds = getBounds(polygon);
 
   let bestPoint = null;
   let bestDistance = -Infinity;
@@ -175,6 +220,18 @@ export function getVisualBoundaryLabelPoint(polygon) {
         bestPoint = candidate;
         bestDistance = distance;
       }
+    }
+  }
+
+  const skeletonBounds = getSkeletonBounds(skeletonSegments);
+  if (bestPoint && skeletonBounds) {
+    const skeletonDiagonal = Math.hypot(
+      skeletonBounds.maxX - skeletonBounds.minX,
+      skeletonBounds.maxY - skeletonBounds.minY
+    );
+    const maxSkeletonDistance = Math.max(14, Math.min(30, skeletonDiagonal * 0.18));
+    if (distanceToSkeleton(bestPoint, skeletonSegments) > maxSkeletonDistance) {
+      return getSkeletonLabelPoint(polygon, skeletonSegments) || bestPoint;
     }
   }
 

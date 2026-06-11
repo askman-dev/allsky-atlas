@@ -198,6 +198,91 @@ export const THEMES = {
       legend: "#5c3317",
     },
   },
+  a4_print_color: {
+    id: "a4_print_color",
+    name: "A4 Print Color (A4 彩印清晰)",
+    background: "none",
+    posterBg: "none",
+    border: "#1f2937",
+    borderOuter: "#d1d5db",
+    paperTransparent: true,
+    stars: {
+      useSpectralColors: true,
+      glow: false,
+      defaultColor: "#111827",
+      stroke: "#111827",
+      strokeWidth: 0.35,
+    },
+    constellations: {
+      line: "#3b3b8f",
+      lineOpacity: 0.72,
+      boundary: "rgba(75, 85, 99, 0.42)",
+      boundaryDash: "3 3",
+      label: "#25256f",
+    },
+    chinese: {
+      line: "#006b5b",
+      lineOpacity: 0.78,
+      label: "#005a4d",
+    },
+    grid: {
+      color: "rgba(31, 41, 55, 0.14)",
+      text: "rgba(31, 41, 55, 0.72)",
+    },
+    ecliptic: {
+      color: "#b4232f",
+      dash: "5 4",
+      opacity: 0.86,
+    },
+    equator: {
+      color: "#1d4e89",
+      dash: "6 4",
+      opacity: 0.82,
+    },
+    galactic: {
+      fill: "rgba(59, 130, 246, 0.055)",
+      stroke: "rgba(30, 64, 175, 0.22)",
+    },
+    text: {
+      title: "#111827",
+      subtitle: "#374151",
+      body: "#111827",
+      legend: "#111827",
+    },
+    typography: {
+      constellationLabel: 14,
+      chineseAsterismLabel: 12.5,
+      starLabel: 10.25,
+      tickLabel: 10,
+      legendSmall: 9.75,
+      legendBody: 10,
+      tableHeader: 9.5,
+      tableBody: 9.75,
+      sectionTitle: 13.5,
+      hemisphereTitle: 17,
+      titleLandscape: 36,
+      titlePortrait: 32,
+      noteLandscape: 10,
+      notePortrait: 9,
+    },
+  },
+};
+
+export const DEFAULT_TYPOGRAPHY = {
+  constellationLabel: 11,
+  chineseAsterismLabel: 10,
+  starLabel: 8,
+  tickLabel: 8,
+  legendSmall: 7.5,
+  legendBody: 8.5,
+  tableHeader: 8,
+  tableBody: 8.5,
+  sectionTitle: 12,
+  hemisphereTitle: 15,
+  titleLandscape: 36,
+  titlePortrait: 32,
+  noteLandscape: 9.5,
+  notePortrait: 8.5,
 };
 
 /**
@@ -206,6 +291,16 @@ export const THEMES = {
  */
 export function getStarColorHSL(bv, themeId) {
   if (themeId === "elegant_white") return "#1a1a1a";
+  if (themeId === "a4_print_color") {
+    if (bv < -0.2) return "#2563eb";
+    if (bv < 0.0) return "#1d70b8";
+    if (bv < 0.2) return "#0f766e";
+    if (bv < 0.4) return "#4b5563";
+    if (bv < 0.6) return "#9a6700";
+    if (bv < 1.0) return "#b45309";
+    if (bv < 1.4) return "#c2410c";
+    return "#b91c1c";
+  }
   if (themeId === "qirui_retro") {
     // Retro mode draws rings. Return the ring color.
     if (bv < 0.0) return "#8bb6ff"; // Blue ring
