@@ -104,7 +104,7 @@ function App() {
   // --- Astronomical Settings ---
   const [projection, setProjection] = useState("polar_equidistant"); // "polar_equidistant" or "polar_stereographic"
   const [minMagLimit, setMinMagLimit] = useState(MAG_RANGE_MIN);
-  const [magLimit, setMagLimit] = useState(MAG_RANGE_MAX);
+  const [magLimit, setMagLimit] = useState(4);
   const [overlapDec, setOverlapDec] = useState(55); // boundary dec angle (overlap up to Dec +/- 55)
   const [northRotation, setNorthRotation] = useState(0); // rotation in degrees
   const [southRotation, setSouthRotation] = useState(0); // rotation in degrees
@@ -295,9 +295,17 @@ function App() {
   // --- Projection Functions ---
   const projectN = (ra, dec) => projectNorth(ra, dec, R, projection, -overlapDec, northRotation);
   const projectS = (ra, dec) => projectSouth(ra, dec, R, projection, overlapDec, southRotation);
-  const formatMagFilterValue = (value) => value >= MAG_RANGE_PLUS ? '6+' : `${Math.round(value)}`;
+  const formatMagFilterValue = (value) => {
+    if (value <= MAG_RANGE_MIN) return '0-';
+    if (value >= MAG_RANGE_PLUS) return '6+';
+    return `${Math.round(value)}`;
+  };
   const isMagnitudeVisible = (star) => {
-    const passesMin = minMagLimit >= MAG_RANGE_PLUS ? star.mag >= 6 : star.mag >= minMagLimit;
+    const passesMin = minMagLimit <= MAG_RANGE_MIN
+      ? true
+      : minMagLimit >= MAG_RANGE_PLUS
+        ? star.mag >= 6
+        : star.mag >= minMagLimit;
     const passesMax = magLimit >= MAG_RANGE_PLUS ? true : star.mag <= magLimit;
     return passesMin && passesMax;
   };
@@ -848,7 +856,7 @@ function App() {
     const labelCandidates = [];
 
     // Constellation labels
-    if (showWesternLines && showWesternNames) {
+    if (showWesternNames) {
       for (const con of westernConstellations) {
         const center = westernCenters[con.abbr];
         if (center) {
@@ -877,7 +885,7 @@ function App() {
     }
 
     // Chinese asterism labels
-    if (showChineseLines && showChineseNames) {
+    if (showChineseNames) {
       for (const ast of chineseConstellations) {
         const center = chineseCenters[ast.id];
         if (center) {
@@ -904,8 +912,8 @@ function App() {
     // Star names labels
     if (showStarNames) {
       for (const star of starPoints) {
-        // Only show names for bright stars
-        if (star.mag <= 3.5) {
+        const isPrimaryStar = star.mag <= 3.5 || constellationStarHips.has(star.hip);
+        if (isPrimaryStar) {
           const name = getLocalizedText(star.nameZh, star.nameEn);
           if (name) {
             labelCandidates.push({
@@ -1422,51 +1430,6 @@ function App() {
             </div>
             <div className="form-field">
               <label>
-                星等过滤范围 <span className="value">{formatMagFilterValue(minMagLimit)} - {formatMagFilterValue(magLimit)}</span>
-              </label>
-              <div className="range-caption">
-                <span>最亮端</span>
-                <span>最暗端</span>
-              </div>
-              <div
-                className="dual-range"
-                style={{
-                  '--range-start': `${magRangeStart}%`,
-                  '--range-end': `${magRangeEnd}%`,
-                }}
-              >
-                <input
-                  type="range"
-                  className="dual-range-input"
-                  min={MAG_RANGE_MIN}
-                  max={MAG_RANGE_MAX}
-                  step={MAG_RANGE_STEP}
-                  value={minMagLimit}
-                  aria-label="最亮端星等"
-                  onChange={(e) => updateMinMagLimit(Number(e.target.value))}
-                />
-                <input
-                  type="range"
-                  className="dual-range-input"
-                  min={MAG_RANGE_MIN}
-                  max={MAG_RANGE_MAX}
-                  step={MAG_RANGE_STEP}
-                  value={magLimit}
-                  aria-label="最暗端星等"
-                  onChange={(e) => updateMagLimit(Number(e.target.value))}
-                />
-              </div>
-              <div className="range-scale">
-                {MAG_RANGE_TICKS.map((tick) => (
-                  <span key={tick}>{formatMagFilterValue(tick)}</span>
-                ))}
-              </div>
-              <p className="control-tip">
-                仅过滤背景星；星座/星官连线用星始终保留。
-              </p>
-            </div>
-            <div className="form-field">
-              <label>
                 南北半球重叠赤纬角 <span className="value">Dec ±{overlapDec}°</span>
               </label>
               <input
@@ -1511,63 +1474,103 @@ function App() {
 
           {/* Group 4: Layout Layers */}
           <div className="control-group">
-            <h3 className="control-group-title">星空图层显示开关</h3>
-            
-            <ToggleRow checked={showWesternLines} onChange={setShowWesternLines}>
-              现代西方星座连线
-            </ToggleRow>
+            <h3 className="control-group-title">星空图层显示</h3>
 
-            <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
-              IAU 现代星座边界线
-            </ToggleRow>
-
-            {showWesternLines && (
-              <>
-                <ToggleRow checked={showWesternNames} onChange={setShowWesternNames} indented muted>
-                  星座名称文字标注
-                </ToggleRow>
-              </>
-            )}
-
-            <ToggleRow
-              checked={showChineseLines}
-              onChange={(checked) => {
-                setShowChineseLines(checked);
-                setShowChineseNames(checked);
-              }}
-            >
-              中国传统星官连线 (三垣二十八宿)
-            </ToggleRow>
-
-            {showChineseLines && (
-              <ToggleRow checked={showChineseNames} onChange={setShowChineseNames} indented muted>
-                星官中文名称标注
+            <div className="control-subgroup">
+              <h4 className="control-subgroup-title">现代星座</h4>
+              <ToggleRow checked={showWesternLines} onChange={setShowWesternLines}>
+                星座连线
               </ToggleRow>
-            )}
+              <ToggleRow checked={showWesternNames} onChange={setShowWesternNames}>
+                星座名称
+              </ToggleRow>
+              <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
+                IAU 星座边界
+              </ToggleRow>
+            </div>
 
-            <ToggleRow checked={showGrid} onChange={setShowGrid}>
-              赤经赤纬度网格经纬线
-            </ToggleRow>
+            <div className="control-subgroup">
+              <h4 className="control-subgroup-title">中国星官</h4>
+              <ToggleRow checked={showChineseLines} onChange={setShowChineseLines}>
+                星官连线
+              </ToggleRow>
+              <ToggleRow checked={showChineseNames} onChange={setShowChineseNames}>
+                星官名称
+              </ToggleRow>
+            </div>
 
-            <ToggleRow checked={showEquator} onChange={setShowEquator}>
-              天球赤道圈 reference line
-            </ToggleRow>
+            <div className="control-subgroup">
+              <h4 className="control-subgroup-title">恒星标注</h4>
+              <ToggleRow checked={showStarNames} onChange={setShowStarNames}>
+                主要恒星名称
+              </ToggleRow>
+            </div>
 
-            <ToggleRow checked={showEcliptic} onChange={setShowEcliptic}>
-              黄道带轨道 (太阳周年视运动)
-            </ToggleRow>
+            <div className="control-subgroup">
+              <h4 className="control-subgroup-title">星点显示</h4>
+              <div className="form-field">
+                <label>
+                  星等范围 <span className="value">{formatMagFilterValue(minMagLimit)} 到 {formatMagFilterValue(magLimit)}</span>
+                </label>
+                <div className="range-caption">
+                  <span>最亮端</span>
+                  <span>最暗端</span>
+                </div>
+                <div
+                  className="dual-range"
+                  style={{
+                    '--range-start': `${magRangeStart}%`,
+                    '--range-end': `${magRangeEnd}%`,
+                  }}
+                >
+                  <input
+                    type="range"
+                    className="dual-range-input"
+                    min={MAG_RANGE_MIN}
+                    max={MAG_RANGE_MAX}
+                    step={MAG_RANGE_STEP}
+                    value={minMagLimit}
+                    aria-label="最亮端星等"
+                    onChange={(e) => updateMinMagLimit(Number(e.target.value))}
+                  />
+                  <input
+                    type="range"
+                    className="dual-range-input"
+                    min={MAG_RANGE_MIN}
+                    max={MAG_RANGE_MAX}
+                    step={MAG_RANGE_STEP}
+                    value={magLimit}
+                    aria-label="最暗端星等"
+                    onChange={(e) => updateMagLimit(Number(e.target.value))}
+                  />
+                </div>
+                <div className="range-scale">
+                  {MAG_RANGE_TICKS.map((tick) => (
+                    <span key={tick}>{formatMagFilterValue(tick)}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
 
-            <ToggleRow checked={showMilkyWay} onChange={setShowMilkyWay}>
-              银道 Milky Way 银河带
-            </ToggleRow>
-
-            <ToggleRow checked={showStarNames} onChange={setShowStarNames}>
-              亮恒星名称标注 (e.g. 织女一/Vega)
-            </ToggleRow>
+            <div className="control-subgroup">
+              <h4 className="control-subgroup-title">参考线与背景</h4>
+              <ToggleRow checked={showGrid} onChange={setShowGrid}>
+                赤经赤纬网格
+              </ToggleRow>
+              <ToggleRow checked={showEquator} onChange={setShowEquator}>
+                天球赤道
+              </ToggleRow>
+              <ToggleRow checked={showEcliptic} onChange={setShowEcliptic}>
+                黄道轨迹
+              </ToggleRow>
+              <ToggleRow checked={showMilkyWay} onChange={setShowMilkyWay}>
+                银河带
+              </ToggleRow>
+            </div>
           </div>
 
           {/* Export Actions */}
-          <div className="control-group" style={{ background: 'rgba(212, 175, 55, 0.03)', borderColor: 'rgba(212, 175, 55, 0.15)' }}>
+          <div className="control-group">
             <button className="btn-primary" onClick={exportSVG}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               导出无损矢量 SVG
