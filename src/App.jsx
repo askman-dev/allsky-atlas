@@ -233,20 +233,24 @@ function App() {
 
   const constellationStarHips = useMemo(() => {
     const hips = new Set();
-    for (const con of westernConstellations) {
-      for (const [hip1, hip2] of con.edges) {
-        hips.add(hip1);
-        hips.add(hip2);
+    if (showWesternLines) {
+      for (const con of westernConstellations) {
+        for (const [hip1, hip2] of con.edges) {
+          hips.add(hip1);
+          hips.add(hip2);
+        }
       }
     }
-    for (const asterism of chineseConstellations) {
-      for (const [hip1, hip2] of asterism.edges) {
-        hips.add(hip1);
-        hips.add(hip2);
+    if (showChineseLines) {
+      for (const asterism of chineseConstellations) {
+        for (const [hip1, hip2] of asterism.edges) {
+          hips.add(hip1);
+          hips.add(hip2);
+        }
       }
     }
     return hips;
-  }, [westernConstellations, chineseConstellations]);
+  }, [westernConstellations, chineseConstellations, showWesternLines, showChineseLines]);
 
   // --- Top Brightest Stars list for Poster Table ---
   const brightestStars = useMemo(() => {

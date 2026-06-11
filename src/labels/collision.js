@@ -78,9 +78,9 @@ export function resolveLabels(labels, mapRadius, starPoints = []) {
       height = 12;
     } else {
       // Star proper name
-      fontSize = 8.5;
-      width = charCount * 5.5 + 4;
-      height = 10;
+      fontSize = 4.25;
+      width = charCount * 2.75 + 2;
+      height = 5;
     }
 
     // Try candidate placements relative to the anchor point (label.x, label.y)
