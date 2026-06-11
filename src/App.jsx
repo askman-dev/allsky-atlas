@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   projectNorth,
   projectSouth,
@@ -19,10 +19,158 @@ const BOUNDARY_LOOKAHEAD = 8;
 const LANGUAGE_MODES = new Set(['zh', 'en', 'both']);
 
 const getInitialLanguageMode = () => {
-  if (typeof window === 'undefined') return 'both';
+  if (typeof window === 'undefined') return 'en';
   const mode = new URLSearchParams(window.location.search).get('hl');
-  return LANGUAGE_MODES.has(mode) ? mode : 'both';
+  return LANGUAGE_MODES.has(mode) ? mode : 'en';
 };
+
+const getDisplayLanguage = (mode) => mode === 'zh' ? 'zh' : 'en';
+
+const POSTER_COPY_PRESETS = {
+  en: {
+    title: 'DUAL HEMISPHERE ALL-SKY COLOR STAR MAP',
+    customNote: 'EPHEMERIS J2000.0 • INTEGRATED CARTOGRAPHY SYSTEM',
+  },
+  zh: {
+    title: '南北双圈全天彩色星图',
+    customNote: '历元 J2000.0 • 综合星图制图系统',
+  },
+};
+
+const UI_TEXT = {
+  en: {
+    appSubtitle: 'All-sky constellation poster generator',
+    loading: 'Loading all-sky stars and constellation data...',
+    loadingSubtext: 'First load may take a few seconds',
+    loadError: 'Unable to load star map data. Please confirm the ingestion script has run.',
+    errorHint: 'Run node src/ingest/parse.js in the terminal to regenerate the data.',
+    themeTypography: 'Design Theme & Typography',
+    starMapTemplate: 'Star Map Style Template',
+    themeClassicNavy: 'Classic Navy',
+    themeDeepSpace: 'Deep Space',
+    themeElegantWhite: 'Elegant White',
+    themeRetroParchment: 'Retro Parchment',
+    fontFamily: 'Font Family',
+    fontSerif: 'Lora / Serif Classic',
+    fontSans: 'Outfit / Sans Modern',
+    canvasLanguage: 'Canvas Language',
+    posterText: 'Poster Text',
+    mainTitle: 'Main Title',
+    footnote: 'Footnote',
+    astronomyProjection: 'Astronomy & Projection',
+    projectionMode: 'Projection Mode',
+    projectionEquidistant: 'Polar Equidistant',
+    projectionStereographic: 'Polar Stereographic',
+    overlapDeclination: 'Hemisphere Overlap Declination',
+    northRotation: 'North Map Rotation',
+    southRotation: 'South Map Rotation',
+    layerDisplay: 'Star Map Layers',
+    modernConstellations: 'Modern Constellations',
+    constellationLines: 'Constellation Lines',
+    constellationNames: 'Constellation Names',
+    iauBoundaries: 'IAU Constellation Boundaries',
+    chineseAsterisms: 'Chinese Asterisms',
+    asterismLines: 'Asterism Lines',
+    asterismNames: 'Asterism Names',
+    starLabels: 'Star Labels',
+    primaryStarNames: 'Primary Star Names',
+    starDots: 'Star Dots',
+    magnitudeRange: 'Magnitude Range',
+    rangeJoin: 'to',
+    brightestEnd: 'Bright End',
+    faintestEnd: 'Faint End',
+    brightMagnitudeAria: 'Bright-end magnitude',
+    faintMagnitudeAria: 'Faint-end magnitude',
+    referenceBackground: 'Reference Lines & Background',
+    raDecGrid: 'RA/Dec Grid',
+    celestialEquator: 'Celestial Equator',
+    eclipticPath: 'Ecliptic Path',
+    milkyWayBand: 'Milky Way Band',
+    exportSvg: 'Export Vector SVG',
+    exportPng: 'Export Print PNG',
+    languageBoth: 'Chinese + English',
+    languageZh: 'Chinese only',
+    languageEn: 'English only',
+    exportedSvg: 'Exported vector SVG poster.',
+    exportSvgFailed: 'SVG export failed. Check the console log.',
+    renderingPng: 'Rendering high-resolution image...',
+    exportedPng: 'Exported print PNG.',
+    exportPngFailed: 'PNG export failed. The browser may not support large canvas rendering.',
+  },
+  zh: {
+    appSubtitle: '全天星座星图印刷海报生成器',
+    loading: '正在加载全天恒星与星座数据源...',
+    loadingSubtext: '首次加载可能需要几秒钟',
+    loadError: '无法加载星图数据，请确认是否已运行 Ingestion 脚本。',
+    errorHint: '请在终端执行 node src/ingest/parse.js 重新生成数据。',
+    themeTypography: '设计主题与排版',
+    starMapTemplate: '星图风格模板',
+    themeClassicNavy: 'Classic Navy (经典深蓝)',
+    themeDeepSpace: 'Deep Space (深空霓虹)',
+    themeElegantWhite: 'Elegant White (极简黑白)',
+    themeRetroParchment: 'Retro Parchment (齐锐版古风)',
+    fontFamily: '字体族配置',
+    fontSerif: 'Lora / 宋体 (衬线古典)',
+    fontSans: 'Outfit / 黑体 (无衬线现代)',
+    canvasLanguage: '画布语言标注',
+    posterText: '海报文字定制',
+    mainTitle: '主标题',
+    footnote: '脚注备注',
+    astronomyProjection: '天文学与投影参数',
+    projectionMode: '天球投影模式',
+    projectionEquidistant: 'Polar Equidistant (极射等距)',
+    projectionStereographic: 'Polar Stereographic (极射赤面投影)',
+    overlapDeclination: '南北半球重叠赤纬角',
+    northRotation: '北天图旋转角度',
+    southRotation: '南天图旋转角度',
+    layerDisplay: '星空图层显示',
+    modernConstellations: '现代星座',
+    constellationLines: '星座连线',
+    constellationNames: '星座名称',
+    iauBoundaries: 'IAU 星座边界',
+    chineseAsterisms: '中国星官',
+    asterismLines: '星官连线',
+    asterismNames: '星官名称',
+    starLabels: '恒星标注',
+    primaryStarNames: '主要恒星名称',
+    starDots: '星点显示',
+    magnitudeRange: '星等范围',
+    rangeJoin: '到',
+    brightestEnd: '最亮端',
+    faintestEnd: '最暗端',
+    brightMagnitudeAria: '最亮端星等',
+    faintMagnitudeAria: '最暗端星等',
+    referenceBackground: '参考线与背景',
+    raDecGrid: '赤经赤纬网格',
+    celestialEquator: '天球赤道',
+    eclipticPath: '黄道轨迹',
+    milkyWayBand: '银河带',
+    exportSvg: '导出无损矢量 SVG',
+    exportPng: '导出印刷级高清 PNG',
+    languageBoth: '中文 + English',
+    languageZh: '仅中文',
+    languageEn: 'English only',
+    exportedSvg: '成功导出巨幅矢量 SVG 海报。',
+    exportSvgFailed: '导出 SVG 失败，请查看控制台日志。',
+    renderingPng: '正在渲染巨幅高清图片，请稍候...',
+    exportedPng: '成功导出 300DPI 巨幅印刷 PNG。',
+    exportPngFailed: '导出 PNG 失败，浏览器可能不支持巨幅 canvas 渲染。',
+  },
+};
+
+const ToggleRow = ({ checked, onChange, children, indented = false, muted = false }) => (
+  <label className="toggle-row" style={indented ? { paddingLeft: '14px' } : undefined}>
+    <span style={muted ? { opacity: 0.8 } : undefined}>{children}</span>
+    <span className="switch">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="slider-switch"></span>
+    </span>
+  </label>
+);
 
 const sphericalSegmentDistance = (a, b) => {
   const deltaRa = Math.min(Math.abs(a.ra - b.ra), 360 - Math.abs(a.ra - b.ra));
@@ -94,18 +242,21 @@ function App() {
   const [inputProbe, setInputProbe] = useState(null);
 
   // --- Poster & Layout Settings ---
-  const [title, setTitle] = useState("ALL-SKY CELESTIAL ATLAS");
-  const [subtitle, setSubtitle] = useState("南北双圈全天彩色星图");
-  const [customNote, setCustomNote] = useState("EPHEMERIS J2000.0 • INTEGRATED CARTOGRAPHY SYSTEM");
-  const [fontFamily, setFontFamily] = useState("serif"); // "serif" or "sans"
   const [labelLanguageMode, setLabelLanguageMode] = useState(getInitialLanguageMode);
+  const displayLanguage = getDisplayLanguage(labelLanguageMode);
+  const uiText = UI_TEXT[displayLanguage];
+  const [titleOverrides, setTitleOverrides] = useState({});
+  const [customNoteOverrides, setCustomNoteOverrides] = useState({});
+  const title = titleOverrides[displayLanguage] ?? POSTER_COPY_PRESETS[displayLanguage].title;
+  const customNote = customNoteOverrides[displayLanguage] ?? POSTER_COPY_PRESETS[displayLanguage].customNote;
+  const [fontFamily, setFontFamily] = useState("serif"); // "serif" or "sans"
   const [themeId, setThemeId] = useState("classic_navy");
 
   // --- Astronomical Settings ---
   const [projection, setProjection] = useState("polar_equidistant"); // "polar_equidistant" or "polar_stereographic"
   const [minMagLimit, setMinMagLimit] = useState(MAG_RANGE_MIN);
   const [magLimit, setMagLimit] = useState(4);
-  const [overlapDec, setOverlapDec] = useState(55); // boundary dec angle (overlap up to Dec +/- 55)
+  const [overlapDec, setOverlapDec] = useState(20); // shared equatorial overlap between hemisphere maps
   const [northRotation, setNorthRotation] = useState(0); // rotation in degrees
   const [southRotation, setSouthRotation] = useState(0); // rotation in degrees
 
@@ -150,7 +301,7 @@ function App() {
         setLoading(false);
       } catch (err) {
         console.error("Failed to load astronomical data:", err);
-        setError("无法加载星图数据，请确认是否已运行 Ingestion 脚本。");
+        setError('load_failed');
         setLoading(false);
       }
     }
@@ -281,7 +432,7 @@ function App() {
 
   const getLocalizedText = (zh, en, order = 'zh-first') => {
     if (labelLanguageMode === "zh") return zh || en || "";
-    if (labelLanguageMode === "en") return en || zh || "";
+    if (labelLanguageMode === "en" || labelLanguageMode === "both") return en || zh || "";
     const primary = order === 'en-first' ? en : zh;
     const secondary = order === 'en-first' ? zh : en;
     return [primary, secondary].filter(Boolean).join(' / ');
@@ -786,7 +937,6 @@ function App() {
   // --- Render Components inside SVG for a single Sphere ---
   const renderSphere = (isNorth) => {
     const projectFn = isNorth ? projectN : projectS;
-    const rot = isNorth ? northRotation : southRotation;
     const limitDec = isNorth ? -overlapDec : overlapDec;
     const clipId = isNorth ? "north-clip" : "south-clip";
 
@@ -1245,10 +1395,10 @@ function App() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      showToast("✅ 成功导出巨幅矢量 SVG 海报！");
+      showToast(uiText.exportedSvg);
     } catch (e) {
       console.error(e);
-      showToast("❌ 导出 SVG 失败，请查看控制台日志。");
+      showToast(uiText.exportSvgFailed);
     }
   };
 
@@ -1256,7 +1406,7 @@ function App() {
   const exportPNG = () => {
     const svgEl = document.getElementById('poster-svg');
     if (!svgEl) return;
-    showToast("⏳ 正在渲染巨幅高清图片，请稍候…");
+    showToast(uiText.renderingPng);
 
     setTimeout(() => {
       try {
@@ -1285,12 +1435,12 @@ function App() {
           link.click();
           document.body.removeChild(link);
           URL.revokeObjectURL(url);
-          showToast("✅ 成功导出 300DPI 巨幅印刷 PNG！");
+          showToast(uiText.exportedPng);
         };
         img.src = url;
       } catch (e) {
         console.error(e);
-        showToast("❌ 导出 PNG 失败，浏览器可能不支持巨幅 canvas 渲染。");
+        showToast(uiText.exportPngFailed);
       }
     }, 100);
   };
@@ -1299,8 +1449,8 @@ function App() {
     return (
       <div className="loading-overlay">
         <div className="spinner"></div>
-        <p className="loading-text">正在加载全天恒星与星座数据源…</p>
-        <p className="loading-subtext">首次加载可能需要几秒钟</p>
+        <p className="loading-text">{uiText.loading}</p>
+        <p className="loading-subtext">{uiText.loadingSubtext}</p>
       </div>
     );
   }
@@ -1308,25 +1458,11 @@ function App() {
   if (error) {
     return (
       <div className="loading-overlay">
-        <p className="loading-text" style={{ color: '#ef4444' }}>{error}</p>
-        <p className="loading-subtext">请在终端执行 node src/ingest/parse.js 重新生成数据。</p>
+        <p className="loading-text" style={{ color: '#ef4444' }}>{error === 'load_failed' ? uiText.loadError : error}</p>
+        <p className="loading-subtext">{uiText.errorHint}</p>
       </div>
     );
   }
-
-  const ToggleRow = ({ checked, onChange, children, indented = false, muted = false }) => (
-    <label className="toggle-row" style={indented ? { paddingLeft: '14px' } : undefined}>
-      <span style={muted ? { opacity: 0.8 } : undefined}>{children}</span>
-      <span className="switch">
-        <input
-          type="checkbox"
-          checked={checked}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <span className="slider-switch"></span>
-      </span>
-    </label>
-  );
 
   return (
     <div className="app-container">
@@ -1337,106 +1473,103 @@ function App() {
       <aside className="sidebar">
         <header className="sidebar-header">
           <h1><span>ALLSKY</span> ATLAS</h1>
-          <p>全天星座星图印刷海报生成器</p>
+          <p>{uiText.appSubtitle}</p>
         </header>
 
         <div className="sidebar-content">
           {/* Group 1: Theme & Typography */}
           <div className="control-group">
-            <h3 className="control-group-title">设计主题与排版</h3>
+            <h3 className="control-group-title">{uiText.themeTypography}</h3>
             <div className="form-field">
-              <label>星图风格模板</label>
+              <label>{uiText.starMapTemplate}</label>
               <select
                 className="select-input"
                 value={themeId}
                 onChange={(e) => setThemeId(e.target.value)}
               >
-                <option value="classic_navy">Classic Navy (经典深蓝)</option>
-                <option value="deep_space">Deep Space (深空霓虹)</option>
-                <option value="elegant_white">Elegant White (极简黑白)</option>
-                <option value="qirui_retro">Retro Parchment (齐锐版古风)</option>
+                <option value="classic_navy">{uiText.themeClassicNavy}</option>
+                <option value="deep_space">{uiText.themeDeepSpace}</option>
+                <option value="elegant_white">{uiText.themeElegantWhite}</option>
+                <option value="qirui_retro">{uiText.themeRetroParchment}</option>
               </select>
             </div>
             <div className="form-field">
-              <label>字体族配置</label>
+              <label>{uiText.fontFamily}</label>
               <select
                 className="select-input"
                 value={fontFamily}
                 onChange={(e) => setFontFamily(e.target.value)}
               >
-                <option value="serif">Lora / 宋体 (衬线古典)</option>
-                <option value="sans">Outfit / 黑体 (无衬线现代)</option>
+                <option value="serif">{uiText.fontSerif}</option>
+                <option value="sans">{uiText.fontSans}</option>
               </select>
             </div>
             <div className="form-field">
-              <label>画布语言标注</label>
+              <label>{uiText.canvasLanguage}</label>
               <select
                 className="select-input"
                 value={labelLanguageMode}
                 onChange={(e) => setLabelLanguageMode(e.target.value)}
               >
-                <option value="both">中文 + English</option>
-                <option value="zh">仅中文</option>
-                <option value="en">English only</option>
+                <option value="en">{uiText.languageEn}</option>
+                <option value="zh">{uiText.languageZh}</option>
+                <option value="both">{uiText.languageBoth}</option>
               </select>
             </div>
           </div>
 
           {/* Group 2: Poster Text */}
           <div className="control-group">
-            <h3 className="control-group-title">海报文字定制</h3>
+            <h3 className="control-group-title">{uiText.posterText}</h3>
             <div className="form-field">
-              <label>主标题</label>
+              <label>{uiText.mainTitle}</label>
               <input
                 type="text"
                 className="text-input"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => setTitleOverrides((current) => ({
+                  ...current,
+                  [displayLanguage]: e.target.value,
+                }))}
               />
             </div>
             <div className="form-field">
-              <label>副标题</label>
-              <input
-                type="text"
-                className="text-input"
-                value={subtitle}
-                onChange={(e) => setSubtitle(e.target.value)}
-              />
-            </div>
-            <div className="form-field">
-              <label>脚注备注</label>
+              <label>{uiText.footnote}</label>
               <input
                 type="text"
                 className="text-input"
                 value={customNote}
-                onChange={(e) => setCustomNote(e.target.value)}
+                onChange={(e) => setCustomNoteOverrides((current) => ({
+                  ...current,
+                  [displayLanguage]: e.target.value,
+                }))}
               />
             </div>
           </div>
 
           {/* Group 3: Astronomy Settings */}
           <div className="control-group">
-            <h3 className="control-group-title">天文学与投影参数</h3>
+            <h3 className="control-group-title">{uiText.astronomyProjection}</h3>
             <div className="form-field">
-              <label>天球投影模式</label>
+              <label>{uiText.projectionMode}</label>
               <select
                 className="select-input"
                 value={projection}
                 onChange={(e) => setProjection(e.target.value)}
               >
-                <option value="polar_equidistant">Polar Equidistant (极射等距)</option>
-                <option value="polar_stereographic">Polar Stereographic (极射赤面投影)</option>
+                <option value="polar_equidistant">{uiText.projectionEquidistant}</option>
+                <option value="polar_stereographic">{uiText.projectionStereographic}</option>
               </select>
             </div>
             <div className="form-field">
               <label>
-                南北半球重叠赤纬角 <span className="value">Dec ±{overlapDec}°</span>
+                {uiText.overlapDeclination} <span className="value">Dec ±{overlapDec}°</span>
               </label>
               <input
                 type="range"
                 className="slider-input"
-                min="40"
-                max="60"
+                min="10"
+                max="40"
                 step="1"
                 value={overlapDec}
                 onChange={(e) => setOverlapDec(parseInt(e.target.value))}
@@ -1444,7 +1577,7 @@ function App() {
             </div>
             <div className="form-field">
               <label>
-                北天图旋转角度 <span className="value">{northRotation}°</span>
+                {uiText.northRotation} <span className="value">{northRotation}°</span>
               </label>
               <input
                 type="range"
@@ -1458,7 +1591,7 @@ function App() {
             </div>
             <div className="form-field">
               <label>
-                南天图旋转角度 <span className="value">{southRotation}°</span>
+                {uiText.southRotation} <span className="value">{southRotation}°</span>
               </label>
               <input
                 type="range"
@@ -1474,47 +1607,47 @@ function App() {
 
           {/* Group 4: Layout Layers */}
           <div className="control-group">
-            <h3 className="control-group-title">星空图层显示</h3>
+            <h3 className="control-group-title">{uiText.layerDisplay}</h3>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">现代星座</h4>
+              <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
               <ToggleRow checked={showWesternLines} onChange={setShowWesternLines}>
-                星座连线
+                {uiText.constellationLines}
               </ToggleRow>
               <ToggleRow checked={showWesternNames} onChange={setShowWesternNames}>
-                星座名称
+                {uiText.constellationNames}
               </ToggleRow>
               <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
-                IAU 星座边界
+                {uiText.iauBoundaries}
               </ToggleRow>
             </div>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">中国星官</h4>
+              <h4 className="control-subgroup-title">{uiText.chineseAsterisms}</h4>
               <ToggleRow checked={showChineseLines} onChange={setShowChineseLines}>
-                星官连线
+                {uiText.asterismLines}
               </ToggleRow>
               <ToggleRow checked={showChineseNames} onChange={setShowChineseNames}>
-                星官名称
+                {uiText.asterismNames}
               </ToggleRow>
             </div>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">恒星标注</h4>
+              <h4 className="control-subgroup-title">{uiText.starLabels}</h4>
               <ToggleRow checked={showStarNames} onChange={setShowStarNames}>
-                主要恒星名称
+                {uiText.primaryStarNames}
               </ToggleRow>
             </div>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">星点显示</h4>
+              <h4 className="control-subgroup-title">{uiText.starDots}</h4>
               <div className="form-field">
                 <label>
-                  星等范围 <span className="value">{formatMagFilterValue(minMagLimit)} 到 {formatMagFilterValue(magLimit)}</span>
+                  {uiText.magnitudeRange} <span className="value">{formatMagFilterValue(minMagLimit)} {uiText.rangeJoin} {formatMagFilterValue(magLimit)}</span>
                 </label>
                 <div className="range-caption">
-                  <span>最亮端</span>
-                  <span>最暗端</span>
+                  <span>{uiText.brightestEnd}</span>
+                  <span>{uiText.faintestEnd}</span>
                 </div>
                 <div
                   className="dual-range"
@@ -1530,7 +1663,7 @@ function App() {
                     max={MAG_RANGE_MAX}
                     step={MAG_RANGE_STEP}
                     value={minMagLimit}
-                    aria-label="最亮端星等"
+                    aria-label={uiText.brightMagnitudeAria}
                     onChange={(e) => updateMinMagLimit(Number(e.target.value))}
                   />
                   <input
@@ -1540,7 +1673,7 @@ function App() {
                     max={MAG_RANGE_MAX}
                     step={MAG_RANGE_STEP}
                     value={magLimit}
-                    aria-label="最暗端星等"
+                    aria-label={uiText.faintMagnitudeAria}
                     onChange={(e) => updateMagLimit(Number(e.target.value))}
                   />
                 </div>
@@ -1553,18 +1686,18 @@ function App() {
             </div>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">参考线与背景</h4>
+              <h4 className="control-subgroup-title">{uiText.referenceBackground}</h4>
               <ToggleRow checked={showGrid} onChange={setShowGrid}>
-                赤经赤纬网格
+                {uiText.raDecGrid}
               </ToggleRow>
               <ToggleRow checked={showEquator} onChange={setShowEquator}>
-                天球赤道
+                {uiText.celestialEquator}
               </ToggleRow>
               <ToggleRow checked={showEcliptic} onChange={setShowEcliptic}>
-                黄道轨迹
+                {uiText.eclipticPath}
               </ToggleRow>
               <ToggleRow checked={showMilkyWay} onChange={setShowMilkyWay}>
-                银河带
+                {uiText.milkyWayBand}
               </ToggleRow>
             </div>
           </div>
@@ -1573,11 +1706,11 @@ function App() {
           <div className="control-group">
             <button className="btn-primary" onClick={exportSVG}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              导出无损矢量 SVG
+              {uiText.exportSvg}
             </button>
             <button className="btn-secondary" onClick={exportPNG}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-              导出印刷级高清 PNG
+              {uiText.exportPng}
             </button>
           </div>
         </div>
@@ -1630,22 +1763,10 @@ function App() {
                 >
                   {title}
                 </text>
+                <line x1="-250" y1="42" x2="250" y2="42" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.7" />
                 <text
                   x="0"
-                  y="40"
-                  textAnchor="middle"
-                  fill={activeTheme.text.subtitle}
-                  fontFamily={varFontPosterSans}
-                  fontSize="18"
-                  fontWeight="600"
-                  letterSpacing="6"
-                >
-                  {subtitle}
-                </text>
-                <line x1="-250" y1="65" x2="250" y2="65" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.7" />
-                <text
-                  x="0"
-                  y="85"
+                  y="62"
                   textAnchor="middle"
                   fill={activeTheme.text.body}
                   fontFamily={varFontPosterSans}
@@ -1754,6 +1875,28 @@ function App() {
                       <text x="35" y="3.5">{getLocalizedText('星官连线', 'Chinese Asterism', 'en-first')}</text>
                     </g>
                   </g>
+                </g>
+
+                {/* Source Code */}
+                <g transform="translate(15, 82)">
+                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="9.5" fontWeight="bold" letterSpacing="1.2">
+                    {getLocalizedText('源代码', 'SOURCE CODE', 'en-first')}
+                  </text>
+                  <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
+                    <text x="0" y="15" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize="8.5" fontWeight="600">
+                      github.com/askman-dev/allsky-atlas
+                    </text>
+                  </a>
+                </g>
+
+                {/* RA Hours */}
+                <g transform="translate(290, 82)">
+                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="9.5" fontWeight="bold" letterSpacing="1.2">
+                    {getLocalizedText('赤经小时', 'RA HOURS', 'en-first')}
+                  </text>
+                  <text x="0" y="15" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="8">
+                    {getLocalizedText('赤经以小时标示，24h 环绕天球一周。', 'Right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
+                  </text>
                 </g>
 
                 {/* Right side: Stars Catalog Table */}
