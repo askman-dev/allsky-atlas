@@ -247,15 +247,20 @@ body {
 
 .range-scale {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 8px;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 0;
   align-items: center;
   color: var(--color-text-muted);
   font-size: 10px;
+  text-align: center;
 }
 
-.range-scale span:nth-child(2) {
-  text-align: center;
+.range-scale span:first-child {
+  text-align: left;
+}
+
+.range-scale span:last-child {
+  text-align: right;
 }
 
 .control-tip {

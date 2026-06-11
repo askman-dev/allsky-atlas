@@ -9,9 +9,11 @@ import {
 import { THEMES, getStarColorHSL } from './themes/styles';
 import { resolveLabels } from './labels/collision';
 
-const MAG_RANGE_MIN = -2.0;
-const MAG_RANGE_MAX = 6.5;
-const MAG_RANGE_STEP = 0.5;
+const MAG_RANGE_MIN = 0;
+const MAG_RANGE_PLUS = 7;
+const MAG_RANGE_MAX = MAG_RANGE_PLUS;
+const MAG_RANGE_STEP = 1;
+const MAG_RANGE_TICKS = [0, 1, 2, 3, 4, 5, 6, MAG_RANGE_PLUS];
 const BOUNDARY_MAX_SEGMENT_DEG = 2.25;
 const BOUNDARY_LOOKAHEAD = 8;
 const LANGUAGE_MODES = new Set(['zh', 'en', 'both']);
@@ -86,6 +88,8 @@ function App() {
   const gestureStateRef = useRef(null);
   const lastInputPointRef = useRef(null);
   const transformFrameRef = useRef(null);
+  const interactionEndTimerRef = useRef(null);
+  const isPreviewInteractingRef = useRef(false);
   const inputDebugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debugInput') === '1';
   const [inputProbe, setInputProbe] = useState(null);
 
@@ -100,7 +104,7 @@ function App() {
   // --- Astronomical Settings ---
   const [projection, setProjection] = useState("polar_equidistant"); // "polar_equidistant" or "polar_stereographic"
   const [minMagLimit, setMinMagLimit] = useState(MAG_RANGE_MIN);
-  const [magLimit, setMagLimit] = useState(6.0);
+  const [magLimit, setMagLimit] = useState(MAG_RANGE_MAX);
   const [overlapDec, setOverlapDec] = useState(55); // boundary dec angle (overlap up to Dec +/- 55)
   const [northRotation, setNorthRotation] = useState(0); // rotation in degrees
   const [southRotation, setSouthRotation] = useState(0); // rotation in degrees
@@ -287,7 +291,12 @@ function App() {
   // --- Projection Functions ---
   const projectN = (ra, dec) => projectNorth(ra, dec, R, projection, -overlapDec, northRotation);
   const projectS = (ra, dec) => projectSouth(ra, dec, R, projection, overlapDec, southRotation);
-  const isMagnitudeVisible = (star) => star.mag >= minMagLimit && star.mag <= magLimit;
+  const formatMagFilterValue = (value) => value >= MAG_RANGE_PLUS ? '6+' : `${Math.round(value)}`;
+  const isMagnitudeVisible = (star) => {
+    const passesMin = minMagLimit >= MAG_RANGE_PLUS ? star.mag >= 6 : star.mag >= minMagLimit;
+    const passesMax = magLimit >= MAG_RANGE_PLUS ? true : star.mag <= magLimit;
+    return passesMin && passesMax;
+  };
   const isStarVisible = (star) => constellationStarHips.has(star.hip) || isMagnitudeVisible(star);
 
   const updateMinMagLimit = (value) => {
@@ -308,12 +317,44 @@ function App() {
     transformFrameRef.current = null;
     if (!posterMockupRef.current) return;
     const { x, y, scale } = transformRef.current;
-    posterMockupRef.current.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    const translate = isPreviewInteractingRef.current
+      ? `translate3d(${x}px, ${y}px, 0)`
+      : `translate(${x}px, ${y}px)`;
+    posterMockupRef.current.style.transform = `${translate} scale(${scale})`;
   };
 
   const schedulePreviewTransform = () => {
     if (transformFrameRef.current !== null) return;
     transformFrameRef.current = requestAnimationFrame(applyPreviewTransform);
+  };
+
+  const beginPreviewInteraction = () => {
+    if (interactionEndTimerRef.current !== null) {
+      clearTimeout(interactionEndTimerRef.current);
+      interactionEndTimerRef.current = null;
+    }
+
+    if (isPreviewInteractingRef.current) return;
+    isPreviewInteractingRef.current = true;
+    if (posterMockupRef.current) {
+      posterMockupRef.current.style.willChange = 'transform';
+    }
+    schedulePreviewTransform();
+  };
+
+  const endPreviewInteractionSoon = () => {
+    if (interactionEndTimerRef.current !== null) {
+      clearTimeout(interactionEndTimerRef.current);
+    }
+
+    interactionEndTimerRef.current = window.setTimeout(() => {
+      interactionEndTimerRef.current = null;
+      isPreviewInteractingRef.current = false;
+      if (posterMockupRef.current) {
+        posterMockupRef.current.style.willChange = '';
+      }
+      schedulePreviewTransform();
+    }, 120);
   };
 
   const zoomPreviewAt = (clientX, clientY, nextScale) => {
@@ -347,13 +388,162 @@ function App() {
     if (!previewArea) return undefined;
     const handledGestureEvents = new WeakSet();
 
-    const updateLastInputPoint = (event) => {
-      if (Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
-        lastInputPointRef.current = {
-          clientX: event.clientX,
-          clientY: event.clientY,
-        };
+    const writeLastInputPoint = (clientX, clientY) => {
+      if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+      if (lastInputPointRef.current) {
+        lastInputPointRef.current.clientX = clientX;
+        lastInputPointRef.current.clientY = clientY;
+        return;
       }
+
+      lastInputPointRef.current = { clientX, clientY };
+    };
+
+    const updateLastInputPoint = (event) => {
+      writeLastInputPoint(event.clientX, event.clientY);
+    };
+
+    const getLatestPointerPoint = (event) => {
+      const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : null;
+      const latest = events?.length ? events[events.length - 1] : event;
+      return {
+        clientX: latest.clientX,
+        clientY: latest.clientY,
+      };
+    };
+
+    const getFirstTwoPointers = () => {
+      const iterator = activePointersRef.current.entries();
+      const first = iterator.next();
+      if (first.done) return null;
+      const second = iterator.next();
+      if (second.done) return null;
+      return [
+        { pointerId: first.value[0], ...first.value[1] },
+        { pointerId: second.value[0], ...second.value[1] },
+      ];
+    };
+
+    const resetDragFromRemainingPointer = () => {
+      const next = activePointersRef.current.entries().next();
+      if (next.done) {
+        dragStateRef.current = null;
+        return;
+      }
+
+      const [pointerId, point] = next.value;
+      dragStateRef.current = {
+        pointerId,
+        startX: point.clientX,
+        startY: point.clientY,
+        originX: transformRef.current.x,
+        originY: transformRef.current.y,
+      };
+    };
+
+    const startPinchFromActivePointers = () => {
+      const pointers = getFirstTwoPointers();
+      if (!pointers) return;
+
+      const pinch = getPinchMetrics(pointers);
+      pinchStateRef.current = {
+        ...pinch,
+        originScale: transformRef.current.scale,
+      };
+      dragStateRef.current = null;
+    };
+
+    const handleNativePointerDown = (event) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+      beginPreviewInteraction();
+      const point = getLatestPointerPoint(event);
+      writeLastInputPoint(point.clientX, point.clientY);
+      activePointersRef.current.set(event.pointerId, point);
+
+      if (typeof previewArea.setPointerCapture === 'function') {
+        try {
+          previewArea.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer capture may fail if the pointer was already released by the browser.
+        }
+      }
+
+      if (activePointersRef.current.size >= 2) {
+        startPinchFromActivePointers();
+        return;
+      }
+
+      dragStateRef.current = {
+        pointerId: event.pointerId,
+        startX: point.clientX,
+        startY: point.clientY,
+        originX: transformRef.current.x,
+        originY: transformRef.current.y,
+      };
+      pinchStateRef.current = null;
+    };
+
+    const handleNativePointerMove = (event) => {
+      const activePoint = activePointersRef.current.get(event.pointerId);
+      if (!activePoint) {
+        updateLastInputPoint(event);
+        return;
+      }
+
+      const point = getLatestPointerPoint(event);
+      activePoint.clientX = point.clientX;
+      activePoint.clientY = point.clientY;
+      writeLastInputPoint(point.clientX, point.clientY);
+
+      if (activePointersRef.current.size >= 2) {
+        if (!pinchStateRef.current) startPinchFromActivePointers();
+        const pointers = getFirstTwoPointers();
+        if (!pointers || !pinchStateRef.current) return;
+
+        const pinch = getPinchMetrics(pointers);
+        if (pinch.distance > 0) {
+          const nextScale = pinchStateRef.current.originScale * (pinch.distance / pinchStateRef.current.distance);
+          zoomPreviewAt(pinch.centerX, pinch.centerY, nextScale);
+        }
+        return;
+      }
+
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      transformRef.current.x = dragState.originX + point.clientX - dragState.startX;
+      transformRef.current.y = dragState.originY + point.clientY - dragState.startY;
+      schedulePreviewTransform();
+    };
+
+    const handleNativePointerUp = (event) => {
+      activePointersRef.current.delete(event.pointerId);
+
+      if (typeof previewArea.releasePointerCapture === 'function') {
+        try {
+          if (previewArea.hasPointerCapture?.(event.pointerId)) {
+            previewArea.releasePointerCapture(event.pointerId);
+          }
+        } catch {
+          // The browser may already have cleared capture on cancel/up.
+        }
+      }
+
+      pinchStateRef.current = null;
+      if (activePointersRef.current.size === 1) {
+        resetDragFromRemainingPointer();
+        return;
+      }
+
+      dragStateRef.current = null;
+      endPreviewInteractionSoon();
+    };
+
+    const clearNativePointers = () => {
+      activePointersRef.current.clear();
+      dragStateRef.current = null;
+      pinchStateRef.current = null;
+      endPreviewInteractionSoon();
     };
 
     const getEventPoint = (event) => {
@@ -434,6 +624,7 @@ function App() {
         return;
       }
 
+      beginPreviewInteraction();
       gestureStateRef.current = {
         originScale: transformRef.current.scale,
       };
@@ -465,9 +656,15 @@ function App() {
       gestureStateRef.current = null;
       const point = getEventPoint(event);
       recordInputProbe(event, 'gesture-end', point, isPointInPreview(point));
+      endPreviewInteractionSoon();
     };
 
-    window.addEventListener('pointermove', updateLastInputPoint, { capture: true, passive: true });
+    previewArea.addEventListener('pointerdown', handleNativePointerDown, { capture: true, passive: true });
+    window.addEventListener('pointermove', handleNativePointerMove, { capture: true, passive: true });
+    window.addEventListener('pointerrawupdate', handleNativePointerMove, { capture: true, passive: true });
+    window.addEventListener('pointerup', handleNativePointerUp, { capture: true, passive: true });
+    window.addEventListener('pointercancel', handleNativePointerUp, { capture: true, passive: true });
+    window.addEventListener('blur', clearNativePointers);
     window.addEventListener('mousemove', updateLastInputPoint, { capture: true, passive: true });
 
     const nativeZoomTargets = [
@@ -484,7 +681,12 @@ function App() {
     }
 
     return () => {
-      window.removeEventListener('pointermove', updateLastInputPoint, { capture: true });
+      previewArea.removeEventListener('pointerdown', handleNativePointerDown, { capture: true });
+      window.removeEventListener('pointermove', handleNativePointerMove, { capture: true });
+      window.removeEventListener('pointerrawupdate', handleNativePointerMove, { capture: true });
+      window.removeEventListener('pointerup', handleNativePointerUp, { capture: true });
+      window.removeEventListener('pointercancel', handleNativePointerUp, { capture: true });
+      window.removeEventListener('blur', clearNativePointers);
       window.removeEventListener('mousemove', updateLastInputPoint, { capture: true });
 
       for (const target of nativeZoomTargets) {
@@ -495,8 +697,12 @@ function App() {
       if (transformFrameRef.current !== null) {
         cancelAnimationFrame(transformFrameRef.current);
       }
+      if (interactionEndTimerRef.current !== null) {
+        clearTimeout(interactionEndTimerRef.current);
+        interactionEndTimerRef.current = null;
+      }
     };
-  }, [inputDebugEnabled]);
+  }, [inputDebugEnabled, loading, error]);
 
   const handlePreviewWheelCapture = (event) => {
     const nativeEvent = event.nativeEvent || event;
@@ -534,6 +740,7 @@ function App() {
     const isHorizontalSwipe = Math.abs(nativeEvent.deltaX) > Math.abs(nativeEvent.deltaY);
     if (!nativeEvent.ctrlKey && isHorizontalSwipe) return;
 
+    beginPreviewInteraction();
     if (inputDebugEnabled) {
       setInputProbe({
         phase: 'preview-wheel-react',
@@ -561,82 +768,7 @@ function App() {
 
     const zoomDelta = Math.exp(-nativeEvent.deltaY * 0.0012);
     zoomPreviewAt(point.clientX, point.clientY, transformRef.current.scale * zoomDelta);
-  };
-
-  const handlePreviewPointerDown = (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    activePointersRef.current.set(event.pointerId, {
-      clientX: event.clientX,
-      clientY: event.clientY,
-    });
-
-    const pointers = [...activePointersRef.current.values()];
-    if (pointers.length >= 2) {
-      const pinch = getPinchMetrics(pointers.slice(0, 2));
-      pinchStateRef.current = {
-        ...pinch,
-        originScale: transformRef.current.scale,
-      };
-      dragStateRef.current = null;
-      return;
-    }
-
-    dragStateRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: transformRef.current.x,
-      originY: transformRef.current.y,
-    };
-  };
-
-  const handlePreviewPointerMove = (event) => {
-    if (!activePointersRef.current.has(event.pointerId)) return;
-    activePointersRef.current.set(event.pointerId, {
-      clientX: event.clientX,
-      clientY: event.clientY,
-    });
-
-    const pointers = [...activePointersRef.current.values()];
-    if (pointers.length >= 2 && pinchStateRef.current) {
-      const pinch = getPinchMetrics(pointers.slice(0, 2));
-      if (pinch.distance > 0) {
-        const nextScale = pinchStateRef.current.originScale * (pinch.distance / pinchStateRef.current.distance);
-        zoomPreviewAt(pinch.centerX, pinch.centerY, nextScale);
-      }
-      return;
-    }
-
-    const dragState = dragStateRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-    transformRef.current = {
-      ...transformRef.current,
-      x: dragState.originX + event.clientX - dragState.startX,
-      y: dragState.originY + event.clientY - dragState.startY,
-    };
-    schedulePreviewTransform();
-  };
-
-  const handlePreviewPointerUp = (event) => {
-    activePointersRef.current.delete(event.pointerId);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-
-    const pointers = [...activePointersRef.current.values()];
-    pinchStateRef.current = null;
-    dragStateRef.current = null;
-
-    if (pointers.length === 1) {
-      dragStateRef.current = {
-        pointerId: [...activePointersRef.current.keys()][0],
-        startX: pointers[0].clientX,
-        startY: pointers[0].clientY,
-        originX: transformRef.current.x,
-        originY: transformRef.current.y,
-      };
-    }
+    endPreviewInteractionSoon();
   };
 
   // --- Render Components inside SVG for a single Sphere ---
@@ -1286,7 +1418,7 @@ function App() {
             </div>
             <div className="form-field">
               <label>
-                星等过滤范围 <span className="value">{minMagLimit.toFixed(1)}m - {magLimit.toFixed(1)}m</span>
+                星等过滤范围 <span className="value">{formatMagFilterValue(minMagLimit)} - {formatMagFilterValue(magLimit)}</span>
               </label>
               <div className="range-caption">
                 <span>最亮端</span>
@@ -1307,7 +1439,7 @@ function App() {
                   step={MAG_RANGE_STEP}
                   value={minMagLimit}
                   aria-label="最亮端星等"
-                  onChange={(e) => updateMinMagLimit(parseFloat(e.target.value))}
+                  onChange={(e) => updateMinMagLimit(Number(e.target.value))}
                 />
                 <input
                   type="range"
@@ -1317,13 +1449,13 @@ function App() {
                   step={MAG_RANGE_STEP}
                   value={magLimit}
                   aria-label="最暗端星等"
-                  onChange={(e) => updateMagLimit(parseFloat(e.target.value))}
+                  onChange={(e) => updateMagLimit(Number(e.target.value))}
                 />
               </div>
               <div className="range-scale">
-                <span>{MAG_RANGE_MIN.toFixed(1)}m</span>
-                <span>越小越亮，越大越暗</span>
-                <span>{MAG_RANGE_MAX.toFixed(1)}m</span>
+                {MAG_RANGE_TICKS.map((tick) => (
+                  <span key={tick}>{formatMagFilterValue(tick)}</span>
+                ))}
               </div>
               <p className="control-tip">
                 仅过滤背景星；星座/星官连线用星始终保留。
@@ -1454,10 +1586,6 @@ function App() {
         ref={previewAreaRef}
         className="preview-area"
         onWheelCapture={handlePreviewWheelCapture}
-        onPointerDown={handlePreviewPointerDown}
-        onPointerMove={handlePreviewPointerMove}
-        onPointerUp={handlePreviewPointerUp}
-        onPointerCancel={handlePreviewPointerUp}
       >
         <div
           ref={posterMockupRef}
