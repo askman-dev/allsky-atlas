@@ -3,9 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/data/compiled/poster.layout.json" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <meta name="description" content="全天星座图海报生成器 (All-Sky Celestial Atlas Builder) - 支持全天恒星数据源编译、天体坐标系极面投影计算与矢量印刷海报导出。" />
     <title>全天星座图海报生成器 | All-Sky Celestial Atlas Builder</title>
+    <script>
+      (() => {
+        const options = { capture: true, passive: false };
+        const preventNativePinchZoom = (event) => {
+          if ((event.ctrlKey || event.type.startsWith('gesture')) && event.cancelable) {
+            event.preventDefault();
+          }
+        };
+        const bind = (target) => {
+          if (!target) return;
+          target.addEventListener('wheel', preventNativePinchZoom, options);
+          target.addEventListener('gesturestart', preventNativePinchZoom, options);
+          target.addEventListener('gesturechange', preventNativePinchZoom, options);
+          target.addEventListener('gestureend', preventNativePinchZoom, options);
+        };
+
+        bind(window);
+        bind(document);
+        bind(document.documentElement);
+        document.addEventListener('DOMContentLoaded', () => bind(document.body), { once: true });
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
