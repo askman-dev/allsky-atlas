@@ -6,6 +6,11 @@ import {
   getEclipticPoints,
   getGalacticContourPoints,
 } from './astro/coords';
+import {
+  getProjectedBoundaryFillPaths,
+  getProjectedBoundaryPolygon,
+  getVisualBoundaryLabelPoint,
+} from './astro/constellationLabels';
 import { THEMES, getStarColorHSL } from './themes/styles';
 import { resolveLabels } from './labels/collision';
 
@@ -17,6 +22,14 @@ const MAG_RANGE_TICKS = [0, 1, 2, 3, 4, 5, 6, MAG_RANGE_PLUS];
 const BOUNDARY_MAX_SEGMENT_DEG = 2.25;
 const BOUNDARY_LOOKAHEAD = 8;
 const LANGUAGE_MODES = new Set(['zh', 'en', 'both']);
+const CONSTELLATION_FILL_PALETTE = [
+  '#5ab4ac',
+  '#d8b365',
+  '#8da0cb',
+  '#fc8d62',
+  '#66c2a5',
+  '#e78ac3',
+];
 
 const getInitialLanguageMode = () => {
   if (typeof window === 'undefined') return 'en';
@@ -69,6 +82,7 @@ const UI_TEXT = {
     constellationLines: 'Constellation Lines',
     constellationNames: 'Constellation Names',
     iauBoundaries: 'IAU Constellation Boundaries',
+    constellationRegionColors: 'Constellation Region Colors',
     chineseAsterisms: 'Chinese Asterisms',
     asterismLines: 'Asterism Lines',
     asterismNames: 'Asterism Names',
@@ -128,6 +142,7 @@ const UI_TEXT = {
     constellationLines: '星座连线',
     constellationNames: '星座名称',
     iauBoundaries: 'IAU 星座边界',
+    constellationRegionColors: '星座区域着色',
     chineseAsterisms: '中国星官',
     asterismLines: '星官连线',
     asterismNames: '星官名称',
@@ -180,6 +195,113 @@ const sphericalSegmentDistance = (a, b) => {
 };
 
 const boundaryPointKey = (pt) => `${pt.ra.toFixed(3)},${pt.dec.toFixed(3)}`;
+
+const buildBoundaryAdjacency = (boundaries) => {
+  const ownersByPoint = new Map();
+
+  for (const [abbr, points] of Object.entries(boundaries)) {
+    for (const point of points) {
+      const key = boundaryPointKey(point);
+      if (!ownersByPoint.has(key)) ownersByPoint.set(key, new Set());
+      ownersByPoint.get(key).add(abbr);
+    }
+  }
+
+  const adjacency = {};
+  for (const abbr of Object.keys(boundaries)) {
+    adjacency[abbr] = new Set();
+  }
+
+  for (const owners of ownersByPoint.values()) {
+    const abbrs = [...owners];
+    for (let i = 0; i < abbrs.length; i++) {
+      for (let j = i + 1; j < abbrs.length; j++) {
+        adjacency[abbrs[i]].add(abbrs[j]);
+        adjacency[abbrs[j]].add(abbrs[i]);
+      }
+    }
+  }
+
+  return adjacency;
+};
+
+const colorBoundaryGraph = (boundaries, paletteSize = 4) => {
+  const adjacency = buildBoundaryAdjacency(boundaries);
+  const nodes = Object.keys(adjacency).sort((a, b) => adjacency[b].size - adjacency[a].size);
+  const uncolored = new Set(nodes);
+  const colorByAbbr = {};
+  let searchSteps = 0;
+  const maxSearchSteps = 100000;
+
+  const chooseNextAbbr = () => {
+    let nextAbbr = null;
+    let bestSaturation = -1;
+    let bestDegree = -1;
+
+    for (const abbr of uncolored) {
+      const neighborColors = new Set(
+        [...adjacency[abbr]]
+          .map((neighbor) => colorByAbbr[neighbor])
+          .filter((color) => color !== undefined)
+      );
+      const degree = adjacency[abbr].size;
+      if (
+        neighborColors.size > bestSaturation ||
+        (neighborColors.size === bestSaturation && degree > bestDegree)
+      ) {
+        nextAbbr = abbr;
+        bestSaturation = neighborColors.size;
+        bestDegree = degree;
+      }
+    }
+
+    return nextAbbr;
+  };
+
+  const getAllowedColors = (abbr) => {
+    const usedColors = new Set(
+      [...adjacency[abbr]]
+        .map((neighbor) => colorByAbbr[neighbor])
+        .filter((color) => color !== undefined)
+    );
+
+    const allowedColors = [];
+    for (let colorIndex = 0; colorIndex < paletteSize; colorIndex++) {
+      if (!usedColors.has(colorIndex)) allowedColors.push(colorIndex);
+    }
+    return allowedColors;
+  };
+
+  const solve = () => {
+    searchSteps++;
+    if (searchSteps > maxSearchSteps) return false;
+    if (uncolored.size === 0) return true;
+
+    const nextAbbr = chooseNextAbbr();
+    const allowedColors = getAllowedColors(nextAbbr);
+    if (allowedColors.length === 0) return false;
+
+    uncolored.delete(nextAbbr);
+    for (const colorIndex of allowedColors) {
+      colorByAbbr[nextAbbr] = colorIndex;
+      if (solve()) return true;
+      delete colorByAbbr[nextAbbr];
+    }
+    uncolored.add(nextAbbr);
+
+    return false;
+  };
+
+  if (solve()) return colorByAbbr;
+
+  for (const abbr of nodes) {
+    if (colorByAbbr[abbr] !== undefined) continue;
+    const allowedColors = getAllowedColors(abbr);
+    colorByAbbr[abbr] = allowedColors[0] ?? 0;
+  }
+
+  return colorByAbbr;
+};
 
 const buildBoundarySegments = (boundaries) => {
   const seen = new Set();
@@ -263,6 +385,7 @@ function App() {
   // --- Layer Toggles ---
   const [showWesternLines, setShowWesternLines] = useState(true);
   const [showWesternBoundaries, setShowWesternBoundaries] = useState(true);
+  const [showWesternBoundaryFills, setShowWesternBoundaryFills] = useState(false);
   const [showWesternNames, setShowWesternNames] = useState(true);
 
   const [showChineseLines, setShowChineseLines] = useState(false);
@@ -381,6 +504,9 @@ function App() {
   }, [chineseConstellations, starsMap]);
 
   const boundarySegments = useMemo(() => buildBoundarySegments(boundaries), [boundaries]);
+  const boundaryColorMap = useMemo(() => (
+    colorBoundaryGraph(boundaries, Math.min(4, CONSTELLATION_FILL_PALETTE.length))
+  ), [boundaries]);
 
   const constellationStarHips = useMemo(() => {
     const hips = new Set();
@@ -1002,6 +1128,16 @@ function App() {
       })
       .join(' ');
 
+    const boundaryFillRegions = showWesternBoundaries && showWesternBoundaryFills
+      ? Object.entries(boundaries)
+        .map(([abbr, points]) => ({
+          abbr,
+          paths: getProjectedBoundaryFillPaths(points, projectFn, limitDec, isNorth),
+          colorIndex: boundaryColorMap[abbr] ?? 0,
+        }))
+        .filter((region) => region.paths.length > 0)
+      : [];
+
     // 7. Labels Processing with Collision Avoidance
     const labelCandidates = [];
 
@@ -1009,26 +1145,31 @@ function App() {
     if (showWesternNames) {
       for (const con of westernConstellations) {
         const center = westernCenters[con.abbr];
-        if (center) {
-          // Check if within sphere declination limit
-          const inSphere = isNorth ? center.dec >= limitDec : center.dec <= limitDec;
-          if (inSphere) {
-            const pt = projectFn(center.ra, center.dec);
-            // Distance from pole
-            const distFromCenter = Math.sqrt(pt.x * pt.x + pt.y * pt.y);
-            if (distFromCenter < R - 15) {
-              const text = getLocalizedText(con.nameZh, con.nameEn);
+        if (!center) continue;
+        const inPrimaryHemisphere = isNorth ? center.dec >= 0 : center.dec < 0;
+        if (!inPrimaryHemisphere) continue;
 
-              labelCandidates.push({
-                id: `con-${con.abbr}`,
-                text,
-                x: pt.x,
-                y: pt.y,
-                priority: 1, // Highest
-                type: 'constellation',
-                dotRadius: 0
-              });
-            }
+        const boundaryPolygon = getProjectedBoundaryPolygon(boundaries[con.abbr] || [], projectFn, limitDec, isNorth);
+        const boundaryLabelPoint = getVisualBoundaryLabelPoint(boundaryPolygon);
+        const centerInSphere = center && (isNorth ? center.dec >= limitDec : center.dec <= limitDec);
+        const pt = boundaryLabelPoint || (centerInSphere ? projectFn(center.ra, center.dec) : null);
+
+        if (pt) {
+          // Distance from pole
+          const distFromCenter = Math.sqrt(pt.x * pt.x + pt.y * pt.y);
+          if (distFromCenter < R - 15) {
+            const text = getLocalizedText(con.nameZh, con.nameEn);
+
+            labelCandidates.push({
+              id: `con-${con.abbr}`,
+              text,
+              x: pt.x,
+              y: pt.y,
+              priority: 1, // Highest
+              type: 'constellation',
+              dotRadius: 0,
+              constrainPolygon: boundaryPolygon,
+            });
           }
         }
       }
@@ -1204,6 +1345,27 @@ function App() {
               strokeDasharray={activeTheme.ecliptic.dash}
               opacity={activeTheme.ecliptic.opacity}
             />
+          )}
+
+          {boundaryFillRegions.length > 0 && (
+            <g opacity="0.14">
+              {boundaryFillRegions.map((region) => (
+                <g
+                  key={`boundary-fill-${isNorth ? 'n' : 's'}-${region.abbr}`}
+                  fill={CONSTELLATION_FILL_PALETTE[region.colorIndex % CONSTELLATION_FILL_PALETTE.length]}
+                  stroke={CONSTELLATION_FILL_PALETTE[region.colorIndex % CONSTELLATION_FILL_PALETTE.length]}
+                  strokeWidth="8"
+                  strokeLinejoin="round"
+                >
+                  {region.paths.map((path, index) => (
+                    <path
+                      key={`boundary-fill-strip-${region.abbr}-${index}`}
+                      d={path}
+                    />
+                  ))}
+                </g>
+              ))}
+            </g>
           )}
 
           {/* IAU constellation boundaries: render reconstructed short boundary segments, not closed polygons. */}
@@ -1620,6 +1782,14 @@ function App() {
               <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
                 {uiText.iauBoundaries}
               </ToggleRow>
+              <ToggleRow
+                checked={showWesternBoundaryFills}
+                onChange={setShowWesternBoundaryFills}
+                indented
+                muted={!showWesternBoundaries}
+              >
+                {uiText.constellationRegionColors}
+              </ToggleRow>
             </div>
 
             <div className="control-subgroup">
@@ -1889,13 +2059,19 @@ function App() {
                   </a>
                 </g>
 
-                {/* RA Hours */}
+                {/* Map Terms */}
                 <g transform="translate(290, 82)">
                   <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="9.5" fontWeight="bold" letterSpacing="1.2">
-                    {getLocalizedText('赤经小时', 'RA HOURS', 'en-first')}
+                    {getLocalizedText('名词解释', 'MAP TERMS', 'en-first')}
                   </text>
-                  <text x="0" y="15" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="8">
-                    {getLocalizedText('赤经以小时标示，24h 环绕天球一周。', 'Right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
+                  <text x="0" y="15" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.6">
+                    {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
+                  </text>
+                  <text x="0" y="28" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.6">
+                    {getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')}
+                  </text>
+                  <text x="0" y="41" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize="7.6">
+                    {getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
                   </text>
                 </g>
 
