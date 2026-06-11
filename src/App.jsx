@@ -45,6 +45,30 @@ const CONSTELLATION_FILL_PALETTE = [
   '#e78ac3',
 ];
 const CSS_PX_PER_MM = 96 / 25.4;
+const DEFAULT_RENDER_SETTINGS = {
+  labelLanguageMode: 'en',
+  fontFamily: 'serif',
+  themeId: 'classic_navy',
+  posterLayout: 'landscape_dual',
+  transparentBackground: false,
+  projection: 'polar_equidistant',
+  minMagLimit: MAG_RANGE_MIN,
+  magLimit: 4,
+  overlapDec: 20,
+  northRotation: 0,
+  southRotation: 0,
+  showWesternLines: true,
+  showWesternBoundaries: true,
+  showWesternBoundaryFills: false,
+  showWesternNames: true,
+  showChineseLines: false,
+  showChineseNames: false,
+  showGrid: false,
+  showEquator: false,
+  showEcliptic: false,
+  showMilkyWay: true,
+  showStarNames: true,
+};
 
 const getInitialLanguageMode = () => {
   if (typeof window === 'undefined') return 'en';
@@ -398,6 +422,9 @@ function App() {
   const isPreviewInteractingRef = useRef(false);
   const inputDebugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debugInput') === '1';
   const [inputProbe, setInputProbe] = useState(null);
+  const [sphereRenderData, setSphereRenderData] = useState({});
+  const sphereWorkerRef = useRef(null);
+  const sphereRequestIdRef = useRef(0);
 
   // --- Poster & Layout Settings ---
   const [labelLanguageMode, setLabelLanguageMode] = useState(getInitialLanguageMode);
@@ -434,6 +461,32 @@ function App() {
   const [showEcliptic, setShowEcliptic] = useState(false);
   const [showMilkyWay, setShowMilkyWay] = useState(true);
   const [showStarNames, setShowStarNames] = useState(true);
+  const [renderSettings, setRenderSettings] = useState(() => ({
+    ...DEFAULT_RENDER_SETTINGS,
+    labelLanguageMode: getInitialLanguageMode(),
+  }));
+  const renderLabelLanguageMode = renderSettings.labelLanguageMode;
+  const renderFontFamily = renderSettings.fontFamily;
+  const renderThemeId = renderSettings.themeId;
+  const renderPosterLayout = renderSettings.posterLayout;
+  const renderTransparentBackground = renderSettings.transparentBackground;
+  const renderProjection = renderSettings.projection;
+  const renderMinMagLimit = renderSettings.minMagLimit;
+  const renderMagLimit = renderSettings.magLimit;
+  const renderOverlapDec = renderSettings.overlapDec;
+  const renderNorthRotation = renderSettings.northRotation;
+  const renderSouthRotation = renderSettings.southRotation;
+  const renderShowWesternLines = renderSettings.showWesternLines;
+  const renderShowWesternBoundaries = renderSettings.showWesternBoundaries;
+  const renderShowWesternBoundaryFills = renderSettings.showWesternBoundaryFills;
+  const renderShowWesternNames = renderSettings.showWesternNames;
+  const renderShowChineseLines = renderSettings.showChineseLines;
+  const renderShowChineseNames = renderSettings.showChineseNames;
+  const renderShowGrid = renderSettings.showGrid;
+  const renderShowEquator = renderSettings.showEquator;
+  const renderShowEcliptic = renderSettings.showEcliptic;
+  const renderShowMilkyWay = renderSettings.showMilkyWay;
+  const renderShowStarNames = renderSettings.showStarNames;
 
   const hidePosterRenderNoticeSoon = () => {
     if (renderNoticeTimerRef.current !== null) {
@@ -446,7 +499,9 @@ function App() {
     }, 240);
   };
 
-  const schedulePosterUpdate = (update) => {
+  const schedulePosterUpdate = (updateControls, updateRenderSettings) => {
+    updateControls();
+
     if (renderNoticeTimerRef.current !== null) {
       clearTimeout(renderNoticeTimerRef.current);
       renderNoticeTimerRef.current = null;
@@ -462,9 +517,12 @@ function App() {
       renderNoticeFrameRef.current = requestAnimationFrame(() => {
         renderNoticeFrameRef.current = null;
         startPosterTransition(() => {
-          update();
+          setRenderSettings((current) => (
+            typeof updateRenderSettings === 'function'
+              ? updateRenderSettings(current)
+              : { ...current, ...updateRenderSettings }
+          ));
         });
-        requestAnimationFrame(hidePosterRenderNoticeSoon);
       });
     });
   };
@@ -482,6 +540,29 @@ function App() {
     if (renderNoticeFrameRef.current !== null) {
       cancelAnimationFrame(renderNoticeFrameRef.current);
     }
+  }, []);
+
+  useEffect(() => {
+    const worker = new Worker(new URL('./workers/sphereWorker.js', import.meta.url), { type: 'module' });
+    sphereWorkerRef.current = worker;
+
+    worker.onmessage = (event) => {
+      const payload = event.data;
+      if (payload.requestId !== sphereRequestIdRef.current) return;
+
+      if (payload.type === 'spheres-computed') {
+        setSphereRenderData(payload.spheres);
+        hidePosterRenderNoticeSoon();
+      } else if (payload.type === 'spheres-error') {
+        console.error('Sphere worker failed:', payload.message);
+        hidePosterRenderNoticeSoon();
+      }
+    };
+
+    return () => {
+      worker.terminate();
+      sphereWorkerRef.current = null;
+    };
   }, []);
 
   // --- Fetch Data ---
@@ -519,12 +600,14 @@ function App() {
   };
 
   // --- Active Theme ---
-  const activeTheme = useMemo(() => THEMES[themeId] || THEMES.classic_navy, [themeId]);
+  const controlTheme = useMemo(() => THEMES[themeId] || THEMES.classic_navy, [themeId]);
+  const controlHasTransparentPaper = transparentBackground || controlTheme.paperTransparent;
+  const activeTheme = useMemo(() => THEMES[renderThemeId] || THEMES.classic_navy, [renderThemeId]);
   const activeTypography = useMemo(() => ({
     ...DEFAULT_TYPOGRAPHY,
     ...(activeTheme.typography || {}),
   }), [activeTheme]);
-  const hasTransparentPaper = transparentBackground || activeTheme.paperTransparent;
+  const hasTransparentPaper = renderTransparentBackground || activeTheme.paperTransparent;
   const posterBackgroundColor = hasTransparentPaper ? 'none' : activeTheme.posterBg;
   const sphereBackgroundColor = hasTransparentPaper ? 'none' : activeTheme.background;
 
@@ -598,7 +681,7 @@ function App() {
 
   const constellationStarHips = useMemo(() => {
     const hips = new Set();
-    if (showWesternLines) {
+    if (renderShowWesternLines) {
       for (const con of westernConstellations) {
         for (const [hip1, hip2] of con.edges) {
           hips.add(hip1);
@@ -606,7 +689,7 @@ function App() {
         }
       }
     }
-    if (showChineseLines) {
+    if (renderShowChineseLines) {
       for (const asterism of chineseConstellations) {
         for (const [hip1, hip2] of asterism.edges) {
           hips.add(hip1);
@@ -615,7 +698,7 @@ function App() {
       }
     }
     return hips;
-  }, [westernConstellations, chineseConstellations, showWesternLines, showChineseLines]);
+  }, [westernConstellations, chineseConstellations, renderShowWesternLines, renderShowChineseLines]);
 
   // --- Top Brightest Stars list for Poster Table ---
   const brightestStars = useMemo(() => {
@@ -645,8 +728,8 @@ function App() {
   };
 
   const getLocalizedText = (zh, en, order = 'zh-first') => {
-    if (labelLanguageMode === "zh") return zh || en || "";
-    if (labelLanguageMode === "en" || labelLanguageMode === "both") return en || zh || "";
+    if (renderLabelLanguageMode === "zh") return zh || en || "";
+    if (renderLabelLanguageMode === "en" || renderLabelLanguageMode === "both") return en || zh || "";
     const primary = order === 'en-first' ? en : zh;
     const secondary = order === 'en-first' ? zh : en;
     return [primary, secondary].filter(Boolean).join(' / ');
@@ -657,33 +740,91 @@ function App() {
   const portraitLayout = POSTER_LAYOUTS.portrait_single;
   const LANDSCAPE_R = landscapeLayout.sphereRadius;
   const PORTRAIT_R = portraitLayout.sphereRadius;
+
+  useEffect(() => {
+    const worker = sphereWorkerRef.current;
+    if (!worker || stars.length === 0) return;
+
+    const requestId = sphereRequestIdRef.current + 1;
+    sphereRequestIdRef.current = requestId;
+    setPosterRenderMessage(uiText.updatingPoster);
+    setIsPosterRendering(true);
+
+    const sphereRadius = renderPosterLayout === 'landscape_dual' ? LANDSCAPE_R : PORTRAIT_R;
+    worker.postMessage({
+      type: 'compute-spheres',
+      requestId,
+      settings: renderSettings,
+      typography: activeTypography,
+      stars,
+      westernConstellations,
+      chineseConstellations,
+      boundaries,
+      boundarySegments,
+      boundaryColorMap,
+      westernCenters,
+      chineseCenters,
+      constellationStarHips: [...constellationStarHips],
+      spheres: [
+        { key: `${renderPosterLayout}-north`, isNorth: true, sphereRadius },
+        { key: `${renderPosterLayout}-south`, isNorth: false, sphereRadius },
+      ],
+    });
+  }, [
+    uiText.updatingPoster,
+    renderSettings,
+    activeTypography,
+    stars,
+    westernConstellations,
+    chineseConstellations,
+    boundaries,
+    boundarySegments,
+    boundaryColorMap,
+    westernCenters,
+    chineseCenters,
+    constellationStarHips,
+    renderPosterLayout,
+    LANDSCAPE_R,
+    PORTRAIT_R,
+  ]);
+
   const formatMagFilterValue = (value) => {
     if (value <= MAG_RANGE_MIN) return '0-';
     if (value >= MAG_RANGE_PLUS) return '6+';
     return `${Math.round(value)}`;
   };
   const isMagnitudeVisible = (star) => {
-    const passesMin = minMagLimit <= MAG_RANGE_MIN
+    const passesMin = renderMinMagLimit <= MAG_RANGE_MIN
       ? true
-      : minMagLimit >= MAG_RANGE_PLUS
+      : renderMinMagLimit >= MAG_RANGE_PLUS
         ? star.mag >= 6
-        : star.mag >= minMagLimit;
-    const passesMax = magLimit >= MAG_RANGE_PLUS ? true : star.mag <= magLimit;
+        : star.mag >= renderMinMagLimit;
+    const passesMax = renderMagLimit >= MAG_RANGE_PLUS ? true : star.mag <= renderMagLimit;
     return passesMin && passesMax;
   };
   const isStarVisible = (star) => constellationStarHips.has(star.hip) || isMagnitudeVisible(star);
 
   const updateMinMagLimit = (value) => {
-    schedulePosterUpdate(() => {
-      setMinMagLimit(Math.min(value, magLimit));
-    });
+    const nextMinMagLimit = Math.min(value, magLimit);
+    schedulePosterUpdate(
+      () => setMinMagLimit(nextMinMagLimit),
+      { minMagLimit: nextMinMagLimit }
+    );
   };
 
   const updateMagLimit = (value) => {
-    schedulePosterUpdate(() => {
-      setMagLimit(value);
-      setMinMagLimit((current) => Math.min(current, value));
-    });
+    const nextMagLimit = value;
+    const nextMinMagLimit = Math.min(minMagLimit, nextMagLimit);
+    schedulePosterUpdate(
+      () => {
+        setMagLimit(nextMagLimit);
+        setMinMagLimit(nextMinMagLimit);
+      },
+      {
+        magLimit: nextMagLimit,
+        minMagLimit: nextMinMagLimit,
+      }
+    );
   };
 
   const magRangeStart = ((minMagLimit - MAG_RANGE_MIN) / (MAG_RANGE_MAX - MAG_RANGE_MIN)) * 100;
@@ -1172,7 +1313,7 @@ function App() {
     const visibleMockup = stage.querySelector('.poster-mockup:not(.is-hidden)');
     if (!visibleMockup) return;
 
-    const layout = posterLayout === 'landscape_dual'
+    const layout = renderPosterLayout === 'landscape_dual'
       ? { widthMm: 297 }
       : { widthMm: 210 };
     const targetCssWidth = layout.widthMm * CSS_PX_PER_MM;
@@ -1188,12 +1329,252 @@ function App() {
 
   // --- Render Components inside SVG for a single Sphere ---
   const renderSphere = (isNorth, sphereRadius = POSTER_LAYOUTS.landscape_dual.sphereRadius, clipPrefix = '') => {
-    const projectFn = isNorth
-      ? (ra, dec) => projectNorth(ra, dec, sphereRadius, projection, -overlapDec, northRotation)
-      : (ra, dec) => projectSouth(ra, dec, sphereRadius, projection, overlapDec, southRotation);
-    const limitDec = isNorth ? -overlapDec : overlapDec;
     const clipId = `${clipPrefix}${isNorth ? "north-clip" : "south-clip"}`;
+    const sphereKey = `${renderPosterLayout}-${isNorth ? 'north' : 'south'}`;
+    const sphereData = sphereRenderData[sphereKey];
 
+    if (!sphereData || sphereData.sphereRadius !== sphereRadius) {
+      return (
+        <g>
+          <defs>
+            <clipPath id={clipId}>
+              <circle cx="0" cy="0" r={sphereRadius} />
+            </clipPath>
+          </defs>
+          <g clipPath={`url(#${clipId})`}>
+            <circle cx="0" cy="0" r={sphereRadius} fill={sphereBackgroundColor} />
+          </g>
+          <circle cx="0" cy="0" r={sphereRadius} fill="none" stroke={activeTheme.border} strokeWidth="1.5" />
+          <circle cx="0" cy="0" r={sphereRadius + 8} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+        </g>
+      );
+    }
+
+    const renderedWorkerSphere = (
+      <g>
+        <defs>
+          <clipPath id={clipId}>
+            <circle cx="0" cy="0" r={sphereRadius} />
+          </clipPath>
+        </defs>
+
+        <g clipPath={`url(#${clipId})`}>
+          <circle cx="0" cy="0" r={sphereRadius} fill={sphereBackgroundColor} />
+
+          {renderShowMilkyWay && (
+            <g opacity="0.8">
+              {sphereData.mwOuterPath && <path d={sphereData.mwOuterPath} fill={activeTheme.galactic.fill} />}
+              {sphereData.mwInnerPath && <path d={sphereData.mwInnerPath} fill={activeTheme.galactic.fill} opacity="0.7" />}
+              {sphereData.mwOuterPath && <path d={sphereData.mwOuterPath} fill="none" stroke={activeTheme.galactic.stroke} strokeWidth="0.8" strokeDasharray="3 6" />}
+            </g>
+          )}
+
+          {renderShowGrid && sphereData.grid.decCircles.map((circle, idx) => (
+            <path
+              key={`dec-c-${idx}`}
+              d={circle.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ')}
+              fill="none"
+              stroke={activeTheme.grid.color}
+              strokeWidth="0.5"
+              strokeDasharray="2 4"
+            />
+          ))}
+
+          {renderShowGrid && sphereData.grid.raRadials.map((radial, idx) => (
+            <path
+              key={`ra-r-${idx}`}
+              d={radial.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ')}
+              fill="none"
+              stroke={activeTheme.grid.color}
+              strokeWidth="0.5"
+              strokeDasharray="2 4"
+            />
+          ))}
+
+          {renderShowEquator && sphereData.equatorPath && (
+            <path
+              d={sphereData.equatorPath}
+              fill="none"
+              stroke={activeTheme.equator.color}
+              strokeWidth="1"
+              strokeDasharray={activeTheme.equator.dash}
+              opacity={activeTheme.equator.opacity}
+            />
+          )}
+
+          {renderShowEcliptic && sphereData.eclipticPath && (
+            <path
+              d={sphereData.eclipticPath}
+              fill="none"
+              stroke={activeTheme.ecliptic.color}
+              strokeWidth="1.2"
+              strokeDasharray={activeTheme.ecliptic.dash}
+              opacity={activeTheme.ecliptic.opacity}
+            />
+          )}
+
+          {sphereData.boundaryFillRegions.length > 0 && (
+            <g opacity="0.18">
+              {sphereData.boundaryFillRegions.map((region) => (
+                <g
+                  key={`boundary-fill-${isNorth ? 'n' : 's'}-${region.abbr}`}
+                  fill={CONSTELLATION_FILL_PALETTE[region.colorIndex % CONSTELLATION_FILL_PALETTE.length]}
+                >
+                  {region.paths.map((path, index) => (
+                    <path key={`boundary-fill-strip-${region.abbr}-${index}`} d={path} />
+                  ))}
+                </g>
+              ))}
+            </g>
+          )}
+
+          {renderShowWesternBoundaries && sphereData.boundaryPath && (
+            <path
+              d={sphereData.boundaryPath}
+              fill="none"
+              stroke={activeTheme.constellations.boundary}
+              strokeWidth="0.55"
+              strokeDasharray={activeTheme.constellations.boundaryDash}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.7"
+            />
+          )}
+
+          {renderShowChineseLines && sphereData.chineseLines.map((line) => (
+            <line
+              key={line.id}
+              x1={line.x1.toFixed(2)}
+              y1={line.y1.toFixed(2)}
+              x2={line.x2.toFixed(2)}
+              y2={line.y2.toFixed(2)}
+              stroke={activeTheme.chinese.line}
+              strokeWidth="0.8"
+              opacity={activeTheme.chinese.lineOpacity}
+            />
+          ))}
+
+          {renderShowWesternLines && sphereData.westernLines.map((line) => (
+            <line
+              key={line.id}
+              x1={line.x1.toFixed(2)}
+              y1={line.y1.toFixed(2)}
+              x2={line.x2.toFixed(2)}
+              y2={line.y2.toFixed(2)}
+              stroke={activeTheme.constellations.line}
+              strokeWidth="0.8"
+              opacity={activeTheme.constellations.lineOpacity}
+            />
+          ))}
+
+          {sphereData.starPoints.map((s, idx) => {
+            const color = getStarColorHSL(s.colorIdx, renderThemeId);
+            const isRetro = activeTheme.stars.retroRings;
+            if (isRetro) {
+              const innerRadius = Math.max(0.5, 2.0 - 0.25 * s.mag);
+              const outerRadius = Math.max(1.2, 5.0 - 0.65 * s.mag);
+              return (
+                <g key={`star-dots-${idx}`} opacity={s.mag > 5 ? 0.6 : 1.0}>
+                  <circle cx={s.x.toFixed(2)} cy={s.y.toFixed(2)} r={innerRadius.toFixed(2)} fill="#201e1a" />
+                  <circle cx={s.x.toFixed(2)} cy={s.y.toFixed(2)} r={outerRadius.toFixed(2)} fill="none" stroke={color} strokeWidth="0.9" />
+                </g>
+              );
+            }
+
+            const showGlow = activeTheme.stars.glow && s.mag <= 2.5;
+            const opacity = Math.max(0.3, Math.min(1.0, 1.1 - 0.12 * (s.mag - 1)));
+            return (
+              <g key={`star-dots-${idx}`}>
+                {showGlow && (
+                  <circle
+                    cx={s.x.toFixed(2)}
+                    cy={s.y.toFixed(2)}
+                    r={(s.r * 2.2).toFixed(2)}
+                    fill={color}
+                    opacity="0.18"
+                    filter="blur(1px)"
+                  />
+                )}
+                <circle
+                  cx={s.x.toFixed(2)}
+                  cy={s.y.toFixed(2)}
+                  r={s.r.toFixed(2)}
+                  fill={color}
+                  opacity={opacity}
+                  stroke={activeTheme.stars.stroke || 'none'}
+                  strokeWidth={activeTheme.stars.strokeWidth || 0}
+                />
+              </g>
+            );
+          })}
+
+          {sphereData.labels.map((lbl, idx) => {
+            const fontColor = lbl.type === 'constellation'
+              ? activeTheme.constellations.label
+              : lbl.type === 'chinese_asterism'
+                ? activeTheme.chinese.label
+                : activeTheme.text.body;
+
+            const isChinese = lbl.type === 'chinese_asterism' || (lbl.type === 'star' && renderShowChineseLines);
+            const fontF = isChinese
+              ? (renderFontFamily === "serif" ? "'Noto Serif SC', serif" : "'Noto Sans SC', sans-serif")
+              : (renderFontFamily === "serif" ? varFontPosterSerif : varFontPosterSans);
+            const weight = lbl.type === 'constellation' || lbl.type === 'chinese_asterism' ? 'bold' : 'normal';
+
+            return (
+              <text
+                key={`lbl-${idx}`}
+                x={lbl.renderX.toFixed(2)}
+                y={lbl.renderY.toFixed(2)}
+                textAnchor={lbl.anchor}
+                fill={fontColor}
+                fontSize={lbl.fontSize}
+                fontFamily={fontF}
+                fontWeight={weight}
+                opacity={lbl.type === 'star' ? 0.85 : 0.9}
+              >
+                {lbl.text}
+              </text>
+            );
+          })}
+        </g>
+
+        <circle cx="0" cy="0" r={sphereRadius} fill="none" stroke={activeTheme.border} strokeWidth="1.5" />
+        <circle cx="0" cy="0" r={sphereRadius + 8} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+
+        {sphereData.ticks.map((t) => (
+          <g key={t.id}>
+            <line
+              x1={t.x1.toFixed(2)}
+              y1={t.y1.toFixed(2)}
+              x2={t.x2.toFixed(2)}
+              y2={t.y2.toFixed(2)}
+              stroke={activeTheme.border}
+              strokeWidth="0.8"
+            />
+            {t.drawText && (
+              <text
+                x={t.textX.toFixed(2)}
+                y={t.textY.toFixed(2)}
+                textAnchor="middle"
+                fontSize={activeTypography.tickLabel}
+                fontFamily={varFontPosterSans}
+                fill={activeTheme.grid.text}
+                fontWeight="500"
+              >
+                {t.text}
+              </text>
+            )}
+          </g>
+        ))}
+      </g>
+    );
+    if (sphereData) return renderedWorkerSphere;
+
+    const projectFn = isNorth
+      ? (ra, dec) => projectNorth(ra, dec, sphereRadius, renderProjection, -renderOverlapDec, renderNorthRotation)
+      : (ra, dec) => projectSouth(ra, dec, sphereRadius, renderProjection, renderOverlapDec, renderSouthRotation);
+    const limitDec = isNorth ? -renderOverlapDec : renderOverlapDec;
     // 1. Filter visible stars
     const visibleStars = stars.filter(s => {
       if (!isStarVisible(s)) return false;
@@ -1256,7 +1637,7 @@ function App() {
       })
       .join(' ');
 
-    const boundaryFillRegions = showWesternBoundaries && showWesternBoundaryFills
+    const boundaryFillRegions = renderShowWesternBoundaries && renderShowWesternBoundaryFills
       ? Object.entries(boundaries)
         .map(([abbr, points]) => ({
           abbr,
@@ -1270,7 +1651,7 @@ function App() {
     const labelCandidates = [];
 
     // Constellation labels
-    if (showWesternNames) {
+    if (renderShowWesternNames) {
       for (const con of westernConstellations) {
         const center = westernCenters[con.abbr];
         if (!center) continue;
@@ -1320,7 +1701,7 @@ function App() {
     }
 
     // Chinese asterism labels
-    if (showChineseNames) {
+    if (renderShowChineseNames) {
       for (const ast of chineseConstellations) {
         const center = chineseCenters[ast.id];
         if (center) {
@@ -1345,7 +1726,7 @@ function App() {
     }
 
     // Star names labels
-    if (showStarNames) {
+    if (renderShowStarNames) {
       for (const star of starPoints) {
         const isPrimaryStar = star.mag <= 3.5 || constellationStarHips.has(star.hip);
         if (isPrimaryStar) {
@@ -1430,7 +1811,7 @@ function App() {
           <circle cx="0" cy="0" r={sphereRadius} fill={sphereBackgroundColor} />
 
           {/* Milky Way ribbons */}
-          {showMilkyWay && (
+          {renderShowMilkyWay && (
             <g opacity="0.8">
               {mwOuterPath && <path d={mwOuterPath} fill={activeTheme.galactic.fill} />}
               {mwInnerPath && <path d={mwInnerPath} fill={activeTheme.galactic.fill} opacity="0.7" />}
@@ -1439,7 +1820,7 @@ function App() {
           )}
 
           {/* Coordinate Grids - Declination Circles */}
-          {showGrid && grid.decCircles.map((circle, idx) => {
+          {renderShowGrid && grid.decCircles.map((circle, idx) => {
             const d = circle.points
               .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
               .join(' ');
@@ -1456,7 +1837,7 @@ function App() {
           })}
 
           {/* Coordinate Grids - RA Radial Lines */}
-          {showGrid && grid.raRadials.map((radial, idx) => {
+          {renderShowGrid && grid.raRadials.map((radial, idx) => {
             const d = radial.points
               .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
               .join(' ');
@@ -1473,7 +1854,7 @@ function App() {
           })}
 
           {/* Celestial Equator */}
-          {showEquator && equatorPath && (
+          {renderShowEquator && equatorPath && (
             <path
               d={equatorPath}
               fill="none"
@@ -1485,7 +1866,7 @@ function App() {
           )}
 
           {/* Ecliptic */}
-          {showEcliptic && eclipticPath && (
+          {renderShowEcliptic && eclipticPath && (
             <path
               d={eclipticPath}
               fill="none"
@@ -1515,7 +1896,7 @@ function App() {
           )}
 
           {/* IAU constellation boundaries: render reconstructed short boundary segments, not closed polygons. */}
-          {showWesternBoundaries && boundaryPath && (
+          {renderShowWesternBoundaries && boundaryPath && (
             <path
               d={boundaryPath}
               fill="none"
@@ -1529,7 +1910,7 @@ function App() {
           )}
 
           {/* Chinese Asterisms Lines */}
-          {showChineseLines && chineseConstellations.map((ast, idx) => {
+          {renderShowChineseLines && chineseConstellations.map((ast, idx) => {
             return ast.edges.map(([hip1, hip2], eIdx) => {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
@@ -1552,7 +1933,7 @@ function App() {
           })}
 
           {/* Western Constellation Lines */}
-          {showWesternLines && westernConstellations.map((con, idx) => {
+          {renderShowWesternLines && westernConstellations.map((con, idx) => {
             return con.edges.map(([hip1, hip2], eIdx) => {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
@@ -1576,7 +1957,7 @@ function App() {
 
           {/* Star Dots */}
           {starPoints.map((s, idx) => {
-            const color = getStarColorHSL(s.colorIdx, themeId);
+            const color = getStarColorHSL(s.colorIdx, renderThemeId);
             const isRetro = activeTheme.stars.retroRings;
             if (isRetro) {
               const innerRadius = Math.max(0.5, 2.0 - 0.25 * s.mag);
@@ -1627,10 +2008,10 @@ function App() {
                 ? activeTheme.chinese.label
                 : activeTheme.text.body;
 
-            const isChinese = lbl.type === 'chinese_asterism' || (lbl.type === 'star' && showChineseLines);
+            const isChinese = lbl.type === 'chinese_asterism' || (lbl.type === 'star' && renderShowChineseLines);
             const fontF = isChinese 
-              ? (fontFamily === "serif" ? "'Noto Serif SC', serif" : "'Noto Sans SC', sans-serif")
-              : (fontFamily === "serif" ? varFontPosterSerif : varFontPosterSans);
+              ? (renderFontFamily === "serif" ? "'Noto Serif SC', serif" : "'Noto Sans SC', sans-serif")
+              : (renderFontFamily === "serif" ? varFontPosterSerif : varFontPosterSans);
 
             const weight = lbl.type === 'constellation' || lbl.type === 'chinese_asterism' ? 'bold' : 'normal';
 
@@ -1688,7 +2069,7 @@ function App() {
   // Font family string resolution for poster text rendering
   const varFontPosterSerif = "'Lora', 'Noto Serif SC', serif";
   const varFontPosterSans = "'Outfit', 'Noto Sans SC', sans-serif";
-  const activePosterFont = fontFamily === "serif" ? varFontPosterSerif : varFontPosterSans;
+  const activePosterFont = renderFontFamily === "serif" ? varFontPosterSerif : varFontPosterSans;
   const getDownloadBaseName = (suffix) => (
     `${title.toLowerCase().replace(/\s+/g, '_')}_${suffix}`
   );
@@ -1803,9 +2184,6 @@ function App() {
 
   return (
     <div className="app-container">
-      {/* Toast Notice */}
-      {toast && <div className="toast">{toast}</div>}
-
       {/* Glassmorphic Sidebar Controls */}
       <aside className="sidebar">
         <header className="sidebar-header">
@@ -1822,7 +2200,13 @@ function App() {
               <select
                 className="select-input"
                 value={themeId}
-                onChange={(e) => schedulePosterUpdate(() => setThemeId(e.target.value))}
+                onChange={(e) => {
+                  const nextThemeId = e.target.value;
+                  schedulePosterUpdate(
+                    () => setThemeId(nextThemeId),
+                    { themeId: nextThemeId }
+                  );
+                }}
               >
                 <option value="classic_navy">{uiText.themeClassicNavy}</option>
                 <option value="deep_space">{uiText.themeDeepSpace}</option>
@@ -1837,23 +2221,32 @@ function App() {
                 <button
                   type="button"
                   className={`segment-button ${posterLayout === 'landscape_dual' ? 'active' : ''}`}
-                  onClick={() => schedulePosterUpdate(() => setPosterLayout('landscape_dual'))}
+                  onClick={() => schedulePosterUpdate(
+                    () => setPosterLayout('landscape_dual'),
+                    { posterLayout: 'landscape_dual' }
+                  )}
                 >
                   {uiText.layoutLandscapeDual}
                 </button>
                 <button
                   type="button"
                   className={`segment-button ${posterLayout === 'portrait_single' ? 'active' : ''}`}
-                  onClick={() => schedulePosterUpdate(() => setPosterLayout('portrait_single'))}
+                  onClick={() => schedulePosterUpdate(
+                    () => setPosterLayout('portrait_single'),
+                    { posterLayout: 'portrait_single' }
+                  )}
                 >
                   {uiText.layoutPortraitSingle}
                 </button>
               </div>
             </div>
             <ToggleRow
-              checked={hasTransparentPaper}
-              onChange={(checked) => schedulePosterUpdate(() => setTransparentBackground(checked))}
-              muted={activeTheme.paperTransparent}
+              checked={controlHasTransparentPaper}
+              onChange={(checked) => schedulePosterUpdate(
+                () => setTransparentBackground(checked),
+                { transparentBackground: checked }
+              )}
+              muted={controlTheme.paperTransparent}
             >
               {uiText.transparentBackground}
             </ToggleRow>
@@ -1862,7 +2255,13 @@ function App() {
               <select
                 className="select-input"
                 value={fontFamily}
-                onChange={(e) => schedulePosterUpdate(() => setFontFamily(e.target.value))}
+                onChange={(e) => {
+                  const nextFontFamily = e.target.value;
+                  schedulePosterUpdate(
+                    () => setFontFamily(nextFontFamily),
+                    { fontFamily: nextFontFamily }
+                  );
+                }}
               >
                 <option value="serif">{uiText.fontSerif}</option>
                 <option value="sans">{uiText.fontSans}</option>
@@ -1873,7 +2272,13 @@ function App() {
               <select
                 className="select-input"
                 value={labelLanguageMode}
-                onChange={(e) => schedulePosterUpdate(() => setLabelLanguageMode(e.target.value))}
+                onChange={(e) => {
+                  const nextLabelLanguageMode = e.target.value;
+                  schedulePosterUpdate(
+                    () => setLabelLanguageMode(nextLabelLanguageMode),
+                    { labelLanguageMode: nextLabelLanguageMode }
+                  );
+                }}
               >
                 <option value="en">{uiText.languageEn}</option>
                 <option value="zh">{uiText.languageZh}</option>
@@ -1919,7 +2324,13 @@ function App() {
               <select
                 className="select-input"
                 value={projection}
-                onChange={(e) => schedulePosterUpdate(() => setProjection(e.target.value))}
+                onChange={(e) => {
+                  const nextProjection = e.target.value;
+                  schedulePosterUpdate(
+                    () => setProjection(nextProjection),
+                    { projection: nextProjection }
+                  );
+                }}
               >
                 <option value="polar_equidistant">{uiText.projectionEquidistant}</option>
                 <option value="polar_stereographic">{uiText.projectionStereographic}</option>
@@ -1936,7 +2347,13 @@ function App() {
                 max="40"
                 step="1"
                 value={overlapDec}
-                onChange={(e) => schedulePosterUpdate(() => setOverlapDec(parseInt(e.target.value)))}
+                onChange={(e) => {
+                  const nextOverlapDec = parseInt(e.target.value);
+                  schedulePosterUpdate(
+                    () => setOverlapDec(nextOverlapDec),
+                    { overlapDec: nextOverlapDec }
+                  );
+                }}
               />
             </div>
             <div className="form-field">
@@ -1950,7 +2367,13 @@ function App() {
                 max="360"
                 step="5"
                 value={northRotation}
-                onChange={(e) => schedulePosterUpdate(() => setNorthRotation(parseInt(e.target.value)))}
+                onChange={(e) => {
+                  const nextNorthRotation = parseInt(e.target.value);
+                  schedulePosterUpdate(
+                    () => setNorthRotation(nextNorthRotation),
+                    { northRotation: nextNorthRotation }
+                  );
+                }}
               />
             </div>
             <div className="form-field">
@@ -1964,7 +2387,13 @@ function App() {
                 max="360"
                 step="5"
                 value={southRotation}
-                onChange={(e) => schedulePosterUpdate(() => setSouthRotation(parseInt(e.target.value)))}
+                onChange={(e) => {
+                  const nextSouthRotation = parseInt(e.target.value);
+                  schedulePosterUpdate(
+                    () => setSouthRotation(nextSouthRotation),
+                    { southRotation: nextSouthRotation }
+                  );
+                }}
               />
             </div>
           </div>
@@ -1975,18 +2404,30 @@ function App() {
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
-              <ToggleRow checked={showWesternLines} onChange={(checked) => schedulePosterUpdate(() => setShowWesternLines(checked))}>
+              <ToggleRow checked={showWesternLines} onChange={(checked) => schedulePosterUpdate(
+                () => setShowWesternLines(checked),
+                { showWesternLines: checked }
+              )}>
                 {uiText.constellationLines}
               </ToggleRow>
-              <ToggleRow checked={showWesternNames} onChange={(checked) => schedulePosterUpdate(() => setShowWesternNames(checked))}>
+              <ToggleRow checked={showWesternNames} onChange={(checked) => schedulePosterUpdate(
+                () => setShowWesternNames(checked),
+                { showWesternNames: checked }
+              )}>
                 {uiText.constellationNames}
               </ToggleRow>
-              <ToggleRow checked={showWesternBoundaries} onChange={(checked) => schedulePosterUpdate(() => setShowWesternBoundaries(checked))}>
+              <ToggleRow checked={showWesternBoundaries} onChange={(checked) => schedulePosterUpdate(
+                () => setShowWesternBoundaries(checked),
+                { showWesternBoundaries: checked }
+              )}>
                 {uiText.iauBoundaries}
               </ToggleRow>
               <ToggleRow
                 checked={showWesternBoundaryFills}
-                onChange={(checked) => schedulePosterUpdate(() => setShowWesternBoundaryFills(checked))}
+                onChange={(checked) => schedulePosterUpdate(
+                  () => setShowWesternBoundaryFills(checked),
+                  { showWesternBoundaryFills: checked }
+                )}
                 indented
                 muted={!showWesternBoundaries}
               >
@@ -1996,17 +2437,26 @@ function App() {
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.chineseAsterisms}</h4>
-              <ToggleRow checked={showChineseLines} onChange={(checked) => schedulePosterUpdate(() => setShowChineseLines(checked))}>
+              <ToggleRow checked={showChineseLines} onChange={(checked) => schedulePosterUpdate(
+                () => setShowChineseLines(checked),
+                { showChineseLines: checked }
+              )}>
                 {uiText.asterismLines}
               </ToggleRow>
-              <ToggleRow checked={showChineseNames} onChange={(checked) => schedulePosterUpdate(() => setShowChineseNames(checked))}>
+              <ToggleRow checked={showChineseNames} onChange={(checked) => schedulePosterUpdate(
+                () => setShowChineseNames(checked),
+                { showChineseNames: checked }
+              )}>
                 {uiText.asterismNames}
               </ToggleRow>
             </div>
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.starLabels}</h4>
-              <ToggleRow checked={showStarNames} onChange={(checked) => schedulePosterUpdate(() => setShowStarNames(checked))}>
+              <ToggleRow checked={showStarNames} onChange={(checked) => schedulePosterUpdate(
+                () => setShowStarNames(checked),
+                { showStarNames: checked }
+              )}>
                 {uiText.primaryStarNames}
               </ToggleRow>
             </div>
@@ -2059,16 +2509,28 @@ function App() {
 
             <div className="control-subgroup">
               <h4 className="control-subgroup-title">{uiText.referenceBackground}</h4>
-              <ToggleRow checked={showGrid} onChange={(checked) => schedulePosterUpdate(() => setShowGrid(checked))}>
+              <ToggleRow checked={showGrid} onChange={(checked) => schedulePosterUpdate(
+                () => setShowGrid(checked),
+                { showGrid: checked }
+              )}>
                 {uiText.raDecGrid}
               </ToggleRow>
-              <ToggleRow checked={showEquator} onChange={(checked) => schedulePosterUpdate(() => setShowEquator(checked))}>
+              <ToggleRow checked={showEquator} onChange={(checked) => schedulePosterUpdate(
+                () => setShowEquator(checked),
+                { showEquator: checked }
+              )}>
                 {uiText.celestialEquator}
               </ToggleRow>
-              <ToggleRow checked={showEcliptic} onChange={(checked) => schedulePosterUpdate(() => setShowEcliptic(checked))}>
+              <ToggleRow checked={showEcliptic} onChange={(checked) => schedulePosterUpdate(
+                () => setShowEcliptic(checked),
+                { showEcliptic: checked }
+              )}>
                 {uiText.eclipticPath}
               </ToggleRow>
-              <ToggleRow checked={showMilkyWay} onChange={(checked) => schedulePosterUpdate(() => setShowMilkyWay(checked))}>
+              <ToggleRow checked={showMilkyWay} onChange={(checked) => schedulePosterUpdate(
+                () => setShowMilkyWay(checked),
+                { showMilkyWay: checked }
+              )}>
                 {uiText.milkyWayBand}
               </ToggleRow>
             </div>
@@ -2107,26 +2569,31 @@ function App() {
             {uiText.fitView}
           </button>
         </div>
-        {isPosterRendering && (
-          <div className="preview-render-toast" role="status" aria-live="polite">
-            <span className="preview-render-spinner" aria-hidden="true"></span>
-            <span className="preview-render-text">{posterRenderMessage}</span>
-            <span className="preview-render-progress" aria-hidden="true"></span>
+        {(toast || isPosterRendering) && (
+          <div className="preview-toast-stack" aria-live="polite">
+            {isPosterRendering && (
+              <div className="preview-render-toast" role="status">
+                <span className="preview-render-spinner" aria-hidden="true"></span>
+                <span className="preview-render-text">{posterRenderMessage}</span>
+                <span className="preview-render-progress" aria-hidden="true"></span>
+              </div>
+            )}
+            {toast && <div className="toast" role="status">{toast}</div>}
           </div>
         )}
         <div
           ref={posterMockupRef}
-          className={`poster-preview-stage ${posterLayout === 'portrait_single' ? 'portrait-stage' : ''}`}
+          className={`poster-preview-stage ${renderPosterLayout === 'portrait_single' ? 'portrait-stage' : ''}`}
         >
         <div
-          className={`poster-mockup ${posterLayout !== 'landscape_dual' ? 'is-hidden' : ''}`}
+          className={`poster-mockup ${renderPosterLayout !== 'landscape_dual' ? 'is-hidden' : ''}`}
           style={hasTransparentPaper ? { backgroundColor: '#ffffff' } : undefined}
         >
           <div className="poster-svg-wrapper">
             {/* The absolute master SVG */}
             <svg
               id="poster-svg-landscape"
-              data-export-svg={posterLayout === 'landscape_dual' ? 'true' : undefined}
+              data-export-svg={renderPosterLayout === 'landscape_dual' ? 'true' : undefined}
               data-export-suffix="landscape-dual"
               viewBox={`0 0 ${landscapeLayout.width} ${landscapeLayout.height}`}
               width={landscapeLayout.width}
@@ -2230,7 +2697,7 @@ function App() {
                               <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
                             </g>
                           ) : (
-                            <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
+                            <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, renderThemeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
                           )}
                           <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
                         </g>
@@ -2334,7 +2801,7 @@ function App() {
             </svg>
           </div>
         </div>
-        <div className={`poster-export-set portrait-set ${posterLayout !== 'portrait_single' ? 'is-hidden' : ''}`}>
+        <div className={`poster-export-set portrait-set ${renderPosterLayout !== 'portrait_single' ? 'is-hidden' : ''}`}>
           {[true, false].map((isNorth) => {
             const suffix = isNorth ? 'north' : 'south';
             const hemisphereTitle = isNorth
@@ -2350,7 +2817,7 @@ function App() {
                 <div className="poster-svg-wrapper">
                   <svg
                     id={`poster-svg-${suffix}`}
-                    data-export-svg={posterLayout === 'portrait_single' ? 'true' : undefined}
+                    data-export-svg={renderPosterLayout === 'portrait_single' ? 'true' : undefined}
                     data-export-suffix={`portrait-${suffix}`}
                     viewBox={`0 0 ${portraitLayout.width} ${portraitLayout.height}`}
                     width={portraitLayout.width}
@@ -2427,7 +2894,7 @@ function App() {
                                     <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
                                   </g>
                                 ) : (
-                                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, themeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
+                                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, renderThemeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
                                 )}
                                 <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
                               </g>
