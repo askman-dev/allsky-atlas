@@ -146,6 +146,7 @@ const UI_TEXT = {
     milkyWayBand: 'Milky Way Band',
     exportSvg: 'Export Vector SVG',
     exportPng: 'Export Print PNG',
+    exportTiledPdf: 'Export A4 Tiled PDF',
     actualSize: 'Actual Size',
     fitView: 'Fit',
     updatingPoster: 'Updating star map...',
@@ -157,6 +158,9 @@ const UI_TEXT = {
     renderingPng: 'Rendering high-resolution image...',
     exportedPng: 'Exported print PNG.',
     exportPngFailed: 'PNG export failed. The browser may not support large canvas rendering.',
+    renderingPdf: 'Rendering tiled A4 PDF...',
+    exportedPdf: 'Exported tiled A4 PDF.',
+    exportPdfFailed: 'PDF export failed. Check the console log.',
   },
   zh: {
     appSubtitle: '全天星座星图印刷海报生成器',
@@ -214,6 +218,7 @@ const UI_TEXT = {
     milkyWayBand: '银河带',
     exportSvg: '导出无损矢量 SVG',
     exportPng: '导出印刷级高清 PNG',
+    exportTiledPdf: '导出 A4 拼接 PDF',
     actualSize: '真实尺寸',
     fitView: '适应窗口',
     updatingPoster: '正在重绘星图...',
@@ -225,6 +230,9 @@ const UI_TEXT = {
     renderingPng: '正在渲染巨幅高清图片，请稍候...',
     exportedPng: '成功导出 300DPI 巨幅印刷 PNG。',
     exportPngFailed: '导出 PNG 失败，浏览器可能不支持巨幅 canvas 渲染。',
+    renderingPdf: '正在生成 A4 拼接 PDF...',
+    exportedPdf: '成功导出 A4 拼接 PDF。',
+    exportPdfFailed: '导出 PDF 失败，请查看控制台日志。',
   },
 };
 
@@ -2100,6 +2108,160 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const canvasToBlob = (canvas, type = 'image/jpeg', quality = 0.92) => (
+    new Promise((resolve) => canvas.toBlob(resolve, type, quality))
+  );
+
+  const asciiBytes = (value) => new TextEncoder().encode(value);
+
+  const concatBytes = (chunks) => {
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const output = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return output;
+  };
+
+  const createTiledPdfBlob = (jpegPages) => {
+    const pageWidthPt = 595.28;
+    const pageHeightPt = 841.89;
+    const chunks = [];
+    const offsets = [0];
+    let byteOffset = 0;
+
+    const append = (chunk) => {
+      chunks.push(chunk);
+      byteOffset += chunk.length;
+    };
+    const appendText = (text) => append(asciiBytes(text));
+    const appendObject = (objectId, bodyChunks) => {
+      offsets[objectId] = byteOffset;
+      appendText(`${objectId} 0 obj\n`);
+      for (const chunk of bodyChunks) {
+        append(typeof chunk === 'string' ? asciiBytes(chunk) : chunk);
+      }
+      appendText('\nendobj\n');
+    };
+
+    appendText('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+
+    const pageObjectIds = [];
+    let nextObjectId = 3;
+
+    for (let i = 0; i < jpegPages.length; i++) {
+      const imageObjectId = nextObjectId++;
+      const contentObjectId = nextObjectId++;
+      const pageObjectId = nextObjectId++;
+      const imageName = `Im${i + 1}`;
+      const page = jpegPages[i];
+      const content = `q\n${pageWidthPt} 0 0 ${pageHeightPt} 0 0 cm\n/${imageName} Do\nQ\n`;
+
+      appendObject(imageObjectId, [
+        `<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.bytes.length} >>\nstream\n`,
+        page.bytes,
+        '\nendstream',
+      ]);
+      appendObject(contentObjectId, [
+        `<< /Length ${asciiBytes(content).length} >>\nstream\n${content}endstream`,
+      ]);
+      appendObject(pageObjectId, [
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidthPt} ${pageHeightPt}] /Resources << /XObject << /${imageName} ${imageObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
+      ]);
+      pageObjectIds.push(pageObjectId);
+    }
+
+    appendObject(1, ['<< /Type /Catalog /Pages 2 0 R >>']);
+    appendObject(2, [`<< /Type /Pages /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageObjectIds.length} >>`]);
+
+    const xrefOffset = byteOffset;
+    appendText(`xref\n0 ${nextObjectId}\n`);
+    appendText('0000000000 65535 f \n');
+    for (let objectId = 1; objectId < nextObjectId; objectId++) {
+      appendText(`${String(offsets[objectId]).padStart(10, '0')} 00000 n \n`);
+    }
+    appendText(`trailer\n<< /Size ${nextObjectId} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
+
+    return new Blob([concatBytes(chunks)], { type: 'application/pdf' });
+  };
+
+  const renderSvgToImage = async (svgEl) => {
+    const svgString = new XMLSerializer().serializeToString(svgEl);
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+
+    try {
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+      return img;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const createTiledPdfPagesForSvg = async (svgEl) => {
+    const pageWidthPx = 1240;
+    const pageHeightPx = 1754;
+    const combinedWidthPx = pageWidthPx * 2;
+    const combinedHeightPx = pageHeightPx;
+    const { width: svgWidth, height: svgHeight } = getSvgDimensions(svgEl);
+    const shouldRotate = svgHeight > svgWidth;
+    const img = await renderSvgToImage(svgEl);
+
+    const combinedCanvas = document.createElement('canvas');
+    combinedCanvas.width = combinedWidthPx;
+    combinedCanvas.height = combinedHeightPx;
+    const combinedCtx = combinedCanvas.getContext('2d');
+    combinedCtx.fillStyle = '#ffffff';
+    combinedCtx.fillRect(0, 0, combinedWidthPx, combinedHeightPx);
+
+    if (shouldRotate) {
+      combinedCtx.save();
+      combinedCtx.translate(combinedWidthPx, 0);
+      combinedCtx.rotate(Math.PI / 2);
+      combinedCtx.drawImage(img, 0, 0, combinedHeightPx, combinedWidthPx);
+      combinedCtx.restore();
+    } else {
+      combinedCtx.drawImage(img, 0, 0, combinedWidthPx, combinedHeightPx);
+    }
+
+    const pages = [];
+    for (let tile = 0; tile < 2; tile++) {
+      const pageCanvas = document.createElement('canvas');
+      pageCanvas.width = pageWidthPx;
+      pageCanvas.height = pageHeightPx;
+      const pageCtx = pageCanvas.getContext('2d');
+      pageCtx.fillStyle = '#ffffff';
+      pageCtx.fillRect(0, 0, pageWidthPx, pageHeightPx);
+      pageCtx.drawImage(
+        combinedCanvas,
+        tile * pageWidthPx,
+        0,
+        pageWidthPx,
+        pageHeightPx,
+        0,
+        0,
+        pageWidthPx,
+        pageHeightPx
+      );
+      const jpegBlob = await canvasToBlob(pageCanvas);
+      if (!jpegBlob) throw new Error('PDF tile rendering returned an empty image.');
+      pages.push({
+        width: pageWidthPx,
+        height: pageHeightPx,
+        bytes: new Uint8Array(await jpegBlob.arrayBuffer()),
+      });
+    }
+
+    return pages;
+  };
+
   // --- Export SVG File ---
   const exportSVG = () => {
     const svgEls = getVisiblePosterSvgs();
@@ -2159,6 +2321,27 @@ function App() {
       } catch (e) {
         console.error(e);
         showToast(uiText.exportPngFailed);
+      }
+    }, 100);
+  };
+
+  const exportTiledPdf = () => {
+    const svgEls = getVisiblePosterSvgs();
+    if (svgEls.length === 0) return;
+    showToast(uiText.renderingPdf);
+
+    setTimeout(async () => {
+      try {
+        const pdfPages = [];
+        for (const svgEl of svgEls) {
+          pdfPages.push(...await createTiledPdfPagesForSvg(svgEl));
+        }
+        const pdfBlob = createTiledPdfBlob(pdfPages);
+        downloadBlob(pdfBlob, `${getDownloadBaseName('a4-tiled-print')}.pdf`);
+        showToast(uiText.exportedPdf);
+      } catch (e) {
+        console.error(e);
+        showToast(uiText.exportPdfFailed);
       }
     }, 100);
   };
@@ -2545,6 +2728,10 @@ function App() {
             <button className="btn-secondary" onClick={exportPNG}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
               {uiText.exportPng}
+            </button>
+            <button className="btn-secondary" onClick={exportTiledPdf}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+              {uiText.exportTiledPdf}
             </button>
           </div>
         </div>
