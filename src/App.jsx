@@ -9,6 +9,67 @@ import {
 import { THEMES, getStarColorHSL } from './themes/styles';
 import { resolveLabels } from './labels/collision';
 
+const MAG_RANGE_MIN = 0;
+const MAG_RANGE_PLUS = 7;
+const MAG_RANGE_MAX = MAG_RANGE_PLUS;
+const MAG_RANGE_STEP = 1;
+const MAG_RANGE_TICKS = [0, 1, 2, 3, 4, 5, 6, MAG_RANGE_PLUS];
+const BOUNDARY_MAX_SEGMENT_DEG = 2.25;
+const BOUNDARY_LOOKAHEAD = 8;
+const LANGUAGE_MODES = new Set(['zh', 'en', 'both']);
+
+const getInitialLanguageMode = () => {
+  if (typeof window === 'undefined') return 'both';
+  const mode = new URLSearchParams(window.location.search).get('hl');
+  return LANGUAGE_MODES.has(mode) ? mode : 'both';
+};
+
+const sphericalSegmentDistance = (a, b) => {
+  const deltaRa = Math.min(Math.abs(a.ra - b.ra), 360 - Math.abs(a.ra - b.ra));
+  const midDec = ((a.dec + b.dec) / 2) * Math.PI / 180;
+  const projectedRa = deltaRa * Math.cos(midDec);
+  return Math.hypot(projectedRa, a.dec - b.dec);
+};
+
+const boundaryPointKey = (pt) => `${pt.ra.toFixed(3)},${pt.dec.toFixed(3)}`;
+
+const buildBoundarySegments = (boundaries) => {
+  const seen = new Set();
+  const segments = [];
+
+  for (const points of Object.values(boundaries)) {
+    const sorted = [...points].sort((a, b) => a.ra - b.ra || a.dec - b.dec);
+
+    for (let i = 0; i < sorted.length; i++) {
+      let bestCandidate = null;
+      const searchEnd = Math.min(sorted.length, i + 1 + BOUNDARY_LOOKAHEAD);
+
+      for (let j = i + 1; j < searchEnd; j++) {
+        const distance = sphericalSegmentDistance(sorted[i], sorted[j]);
+        if (
+          distance > 0.001 &&
+          distance <= BOUNDARY_MAX_SEGMENT_DEG &&
+          (!bestCandidate || distance < bestCandidate.distance)
+        ) {
+          bestCandidate = { point: sorted[j], distance };
+        }
+      }
+
+      if (!bestCandidate) continue;
+
+      const aKey = boundaryPointKey(sorted[i]);
+      const bKey = boundaryPointKey(bestCandidate.point);
+      const segmentKey = [aKey, bKey].sort().join('|');
+      if (seen.has(segmentKey)) continue;
+
+      seen.add(segmentKey);
+      segments.push([sorted[i], bestCandidate.point]);
+    }
+  }
+
+  return segments;
+};
+
 function App() {
   // --- State Variables ---
   const [stars, setStars] = useState([]);
@@ -18,17 +79,32 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  const previewAreaRef = useRef(null);
+  const posterMockupRef = useRef(null);
+  const transformRef = useRef({ scale: 1, x: 0, y: 0 });
+  const dragStateRef = useRef(null);
+  const activePointersRef = useRef(new Map());
+  const pinchStateRef = useRef(null);
+  const gestureStateRef = useRef(null);
+  const lastInputPointRef = useRef(null);
+  const transformFrameRef = useRef(null);
+  const interactionEndTimerRef = useRef(null);
+  const isPreviewInteractingRef = useRef(false);
+  const inputDebugEnabled = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debugInput') === '1';
+  const [inputProbe, setInputProbe] = useState(null);
 
   // --- Poster & Layout Settings ---
   const [title, setTitle] = useState("ALL-SKY CELESTIAL ATLAS");
   const [subtitle, setSubtitle] = useState("南北双圈全天彩色星图");
   const [customNote, setCustomNote] = useState("EPHEMERIS J2000.0 • INTEGRATED CARTOGRAPHY SYSTEM");
   const [fontFamily, setFontFamily] = useState("serif"); // "serif" or "sans"
+  const [labelLanguageMode, setLabelLanguageMode] = useState(getInitialLanguageMode);
   const [themeId, setThemeId] = useState("classic_navy");
 
   // --- Astronomical Settings ---
   const [projection, setProjection] = useState("polar_equidistant"); // "polar_equidistant" or "polar_stereographic"
-  const [magLimit, setMagLimit] = useState(6.0);
+  const [minMagLimit, setMinMagLimit] = useState(MAG_RANGE_MIN);
+  const [magLimit, setMagLimit] = useState(MAG_RANGE_MAX);
   const [overlapDec, setOverlapDec] = useState(55); // boundary dec angle (overlap up to Dec +/- 55)
   const [northRotation, setNorthRotation] = useState(0); // rotation in degrees
   const [southRotation, setSouthRotation] = useState(0); // rotation in degrees
@@ -37,16 +113,21 @@ function App() {
   const [showWesternLines, setShowWesternLines] = useState(true);
   const [showWesternBoundaries, setShowWesternBoundaries] = useState(true);
   const [showWesternNames, setShowWesternNames] = useState(true);
-  const [westernLabelMode, setWesternLabelMode] = useState("both"); // "en", "zh", "both"
 
   const [showChineseLines, setShowChineseLines] = useState(false);
   const [showChineseNames, setShowChineseNames] = useState(false);
 
-  const [showGrid, setShowGrid] = useState(true);
-  const [showEquator, setShowEquator] = useState(true);
-  const [showEcliptic, setShowEcliptic] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
+  const [showEquator, setShowEquator] = useState(false);
+  const [showEcliptic, setShowEcliptic] = useState(false);
   const [showMilkyWay, setShowMilkyWay] = useState(true);
   const [showStarNames, setShowStarNames] = useState(true);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('hl', labelLanguageMode);
+    window.history.replaceState(null, '', url);
+  }, [labelLanguageMode]);
 
   // --- Fetch Data ---
   useEffect(() => {
@@ -148,6 +229,29 @@ function App() {
     return centers;
   }, [chineseConstellations, starsMap]);
 
+  const boundarySegments = useMemo(() => buildBoundarySegments(boundaries), [boundaries]);
+
+  const constellationStarHips = useMemo(() => {
+    const hips = new Set();
+    if (showWesternLines) {
+      for (const con of westernConstellations) {
+        for (const [hip1, hip2] of con.edges) {
+          hips.add(hip1);
+          hips.add(hip2);
+        }
+      }
+    }
+    if (showChineseLines) {
+      for (const asterism of chineseConstellations) {
+        for (const [hip1, hip2] of asterism.edges) {
+          hips.add(hip1);
+          hips.add(hip2);
+        }
+      }
+    }
+    return hips;
+  }, [westernConstellations, chineseConstellations, showWesternLines, showChineseLines]);
+
   // --- Top Brightest Stars list for Poster Table ---
   const brightestStars = useMemo(() => {
     if (stars.length === 0) return [];
@@ -175,12 +279,501 @@ function App() {
     return `${sign}${degrees.toString().padStart(2, '0')}°${minutes.toString().padStart(2, '0')}'`;
   };
 
-  // --- Radius of the main circular spheres ---
+  const getLocalizedText = (zh, en, order = 'zh-first') => {
+    if (labelLanguageMode === "zh") return zh || en || "";
+    if (labelLanguageMode === "en") return en || zh || "";
+    const primary = order === 'en-first' ? en : zh;
+    const secondary = order === 'en-first' ? zh : en;
+    return [primary, secondary].filter(Boolean).join(' / ');
+  };
+
+  // --- Poster dimensions and radius of the main circular spheres ---
+  const POSTER_WIDTH = 1700;
+  const POSTER_HEIGHT = 1200;
   const R = 330;
 
   // --- Projection Functions ---
   const projectN = (ra, dec) => projectNorth(ra, dec, R, projection, -overlapDec, northRotation);
   const projectS = (ra, dec) => projectSouth(ra, dec, R, projection, overlapDec, southRotation);
+  const formatMagFilterValue = (value) => value >= MAG_RANGE_PLUS ? '6+' : `${Math.round(value)}`;
+  const isMagnitudeVisible = (star) => {
+    const passesMin = minMagLimit >= MAG_RANGE_PLUS ? star.mag >= 6 : star.mag >= minMagLimit;
+    const passesMax = magLimit >= MAG_RANGE_PLUS ? true : star.mag <= magLimit;
+    return passesMin && passesMax;
+  };
+  const isStarVisible = (star) => constellationStarHips.has(star.hip) || isMagnitudeVisible(star);
+
+  const updateMinMagLimit = (value) => {
+    setMinMagLimit(Math.min(value, magLimit));
+  };
+
+  const updateMagLimit = (value) => {
+    setMagLimit(value);
+    setMinMagLimit((current) => Math.min(current, value));
+  };
+
+  const magRangeStart = ((minMagLimit - MAG_RANGE_MIN) / (MAG_RANGE_MAX - MAG_RANGE_MIN)) * 100;
+  const magRangeEnd = ((magLimit - MAG_RANGE_MIN) / (MAG_RANGE_MAX - MAG_RANGE_MIN)) * 100;
+
+  const clampZoom = (value) => Math.max(0.45, Math.min(6, value));
+
+  const applyPreviewTransform = () => {
+    transformFrameRef.current = null;
+    if (!posterMockupRef.current) return;
+    const { x, y, scale } = transformRef.current;
+    const translate = isPreviewInteractingRef.current
+      ? `translate3d(${x}px, ${y}px, 0)`
+      : `translate(${x}px, ${y}px)`;
+    posterMockupRef.current.style.transform = `${translate} scale(${scale})`;
+  };
+
+  const schedulePreviewTransform = () => {
+    if (transformFrameRef.current !== null) return;
+    transformFrameRef.current = requestAnimationFrame(applyPreviewTransform);
+  };
+
+  const beginPreviewInteraction = () => {
+    if (interactionEndTimerRef.current !== null) {
+      clearTimeout(interactionEndTimerRef.current);
+      interactionEndTimerRef.current = null;
+    }
+
+    if (isPreviewInteractingRef.current) return;
+    isPreviewInteractingRef.current = true;
+    if (posterMockupRef.current) {
+      posterMockupRef.current.style.willChange = 'transform';
+    }
+    schedulePreviewTransform();
+  };
+
+  const endPreviewInteractionSoon = () => {
+    if (interactionEndTimerRef.current !== null) {
+      clearTimeout(interactionEndTimerRef.current);
+    }
+
+    interactionEndTimerRef.current = window.setTimeout(() => {
+      interactionEndTimerRef.current = null;
+      isPreviewInteractingRef.current = false;
+      if (posterMockupRef.current) {
+        posterMockupRef.current.style.willChange = '';
+      }
+      schedulePreviewTransform();
+    }, 120);
+  };
+
+  const zoomPreviewAt = (clientX, clientY, nextScale) => {
+    const previewRect = previewAreaRef.current?.getBoundingClientRect();
+    if (!previewRect) return;
+
+    const current = transformRef.current;
+    const clampedScale = clampZoom(nextScale);
+    const scaleRatio = clampedScale / current.scale;
+    const centerX = previewRect.left + previewRect.width / 2;
+    const centerY = previewRect.top + previewRect.height / 2;
+
+    transformRef.current = {
+      scale: clampedScale,
+      x: clientX - centerX - (clientX - centerX - current.x) * scaleRatio,
+      y: clientY - centerY - (clientY - centerY - current.y) * scaleRatio,
+    };
+    schedulePreviewTransform();
+  };
+
+  const getPinchMetrics = (pointers) => {
+    const [a, b] = pointers;
+    const centerX = (a.clientX + b.clientX) / 2;
+    const centerY = (a.clientY + b.clientY) / 2;
+    const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    return { centerX, centerY, distance };
+  };
+
+  useEffect(() => {
+    const previewArea = previewAreaRef.current;
+    if (!previewArea) return undefined;
+    const handledGestureEvents = new WeakSet();
+
+    const writeLastInputPoint = (clientX, clientY) => {
+      if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+      if (lastInputPointRef.current) {
+        lastInputPointRef.current.clientX = clientX;
+        lastInputPointRef.current.clientY = clientY;
+        return;
+      }
+
+      lastInputPointRef.current = { clientX, clientY };
+    };
+
+    const updateLastInputPoint = (event) => {
+      writeLastInputPoint(event.clientX, event.clientY);
+    };
+
+    const getLatestPointerPoint = (event) => {
+      const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : null;
+      const latest = events?.length ? events[events.length - 1] : event;
+      return {
+        clientX: latest.clientX,
+        clientY: latest.clientY,
+      };
+    };
+
+    const getFirstTwoPointers = () => {
+      const iterator = activePointersRef.current.entries();
+      const first = iterator.next();
+      if (first.done) return null;
+      const second = iterator.next();
+      if (second.done) return null;
+      return [
+        { pointerId: first.value[0], ...first.value[1] },
+        { pointerId: second.value[0], ...second.value[1] },
+      ];
+    };
+
+    const resetDragFromRemainingPointer = () => {
+      const next = activePointersRef.current.entries().next();
+      if (next.done) {
+        dragStateRef.current = null;
+        return;
+      }
+
+      const [pointerId, point] = next.value;
+      dragStateRef.current = {
+        pointerId,
+        startX: point.clientX,
+        startY: point.clientY,
+        originX: transformRef.current.x,
+        originY: transformRef.current.y,
+      };
+    };
+
+    const startPinchFromActivePointers = () => {
+      const pointers = getFirstTwoPointers();
+      if (!pointers) return;
+
+      const pinch = getPinchMetrics(pointers);
+      pinchStateRef.current = {
+        ...pinch,
+        originScale: transformRef.current.scale,
+      };
+      dragStateRef.current = null;
+    };
+
+    const handleNativePointerDown = (event) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+      beginPreviewInteraction();
+      const point = getLatestPointerPoint(event);
+      writeLastInputPoint(point.clientX, point.clientY);
+      activePointersRef.current.set(event.pointerId, point);
+
+      if (typeof previewArea.setPointerCapture === 'function') {
+        try {
+          previewArea.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer capture may fail if the pointer was already released by the browser.
+        }
+      }
+
+      if (activePointersRef.current.size >= 2) {
+        startPinchFromActivePointers();
+        return;
+      }
+
+      dragStateRef.current = {
+        pointerId: event.pointerId,
+        startX: point.clientX,
+        startY: point.clientY,
+        originX: transformRef.current.x,
+        originY: transformRef.current.y,
+      };
+      pinchStateRef.current = null;
+    };
+
+    const handleNativePointerMove = (event) => {
+      const activePoint = activePointersRef.current.get(event.pointerId);
+      if (!activePoint) {
+        updateLastInputPoint(event);
+        return;
+      }
+
+      const point = getLatestPointerPoint(event);
+      activePoint.clientX = point.clientX;
+      activePoint.clientY = point.clientY;
+      writeLastInputPoint(point.clientX, point.clientY);
+
+      if (activePointersRef.current.size >= 2) {
+        if (!pinchStateRef.current) startPinchFromActivePointers();
+        const pointers = getFirstTwoPointers();
+        if (!pointers || !pinchStateRef.current) return;
+
+        const pinch = getPinchMetrics(pointers);
+        if (pinch.distance > 0) {
+          const nextScale = pinchStateRef.current.originScale * (pinch.distance / pinchStateRef.current.distance);
+          zoomPreviewAt(pinch.centerX, pinch.centerY, nextScale);
+        }
+        return;
+      }
+
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      transformRef.current.x = dragState.originX + point.clientX - dragState.startX;
+      transformRef.current.y = dragState.originY + point.clientY - dragState.startY;
+      schedulePreviewTransform();
+    };
+
+    const handleNativePointerUp = (event) => {
+      activePointersRef.current.delete(event.pointerId);
+
+      if (typeof previewArea.releasePointerCapture === 'function') {
+        try {
+          if (previewArea.hasPointerCapture?.(event.pointerId)) {
+            previewArea.releasePointerCapture(event.pointerId);
+          }
+        } catch {
+          // The browser may already have cleared capture on cancel/up.
+        }
+      }
+
+      pinchStateRef.current = null;
+      if (activePointersRef.current.size === 1) {
+        resetDragFromRemainingPointer();
+        return;
+      }
+
+      dragStateRef.current = null;
+      endPreviewInteractionSoon();
+    };
+
+    const clearNativePointers = () => {
+      activePointersRef.current.clear();
+      dragStateRef.current = null;
+      pinchStateRef.current = null;
+      endPreviewInteractionSoon();
+    };
+
+    const getEventPoint = (event) => {
+      const hasEventPoint =
+        Number.isFinite(event.clientX) &&
+        Number.isFinite(event.clientY) &&
+        (event.clientX !== 0 || event.clientY !== 0);
+
+      if (hasEventPoint) {
+        return {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          source: 'event',
+        };
+      }
+
+      if (lastInputPointRef.current) {
+        return {
+          ...lastInputPointRef.current,
+          source: 'last-pointer',
+        };
+      }
+
+      const previewRect = previewArea.getBoundingClientRect();
+      return {
+        clientX: previewRect.left + previewRect.width / 2,
+        clientY: previewRect.top + previewRect.height / 2,
+        source: 'preview-center',
+      };
+    };
+
+    const isPointInPreview = ({ clientX, clientY }) => {
+      const previewRect = previewArea.getBoundingClientRect();
+      return (
+        clientX >= previewRect.left &&
+        clientX <= previewRect.right &&
+        clientY >= previewRect.top &&
+        clientY <= previewRect.bottom
+      );
+    };
+
+    const recordInputProbe = (event, phase, point, inPreview) => {
+      if (!inputDebugEnabled) return;
+
+      setInputProbe({
+        phase,
+        type: event.type,
+        ctrlKey: Boolean(event.ctrlKey),
+        cancelable: Boolean(event.cancelable),
+        defaultPrevented: Boolean(event.defaultPrevented),
+        inPreview: Boolean(inPreview),
+        pointSource: point?.source || 'none',
+        clientX: Math.round(point?.clientX ?? 0),
+        clientY: Math.round(point?.clientY ?? 0),
+        deltaX: Math.round(event.deltaX ?? 0),
+        deltaY: Math.round(event.deltaY ?? 0),
+        scale: Number.isFinite(event.scale) ? event.scale.toFixed(3) : '',
+        visualScale: window.visualViewport?.scale?.toFixed(3) || '1.000',
+        target: [
+          event.target?.tagName?.toLowerCase(),
+          event.target?.className && typeof event.target.className === 'string' ? `.${event.target.className.split(' ').filter(Boolean).slice(0, 2).join('.')}` : '',
+        ].filter(Boolean).join(''),
+        time: new Date().toLocaleTimeString(),
+      });
+    };
+
+    const handleGlobalGestureStart = (event) => {
+      if (handledGestureEvents.has(event)) return;
+      handledGestureEvents.add(event);
+
+      const point = getEventPoint(event);
+      const isInPreview = isPointInPreview(point);
+      if (event.cancelable) event.preventDefault();
+      recordInputProbe(event, 'gesture-start', point, isInPreview);
+
+      if (!isInPreview) {
+        gestureStateRef.current = null;
+        return;
+      }
+
+      beginPreviewInteraction();
+      gestureStateRef.current = {
+        originScale: transformRef.current.scale,
+      };
+    };
+
+    const handleGlobalGestureChange = (event) => {
+      if (handledGestureEvents.has(event)) return;
+      handledGestureEvents.add(event);
+
+      const point = getEventPoint(event);
+      const isInPreview = isPointInPreview(point);
+      if (event.cancelable) event.preventDefault();
+      recordInputProbe(event, 'gesture-change', point, isInPreview);
+
+      if (!isInPreview) {
+        gestureStateRef.current = null;
+        return;
+      }
+
+      const originScale = gestureStateRef.current?.originScale || transformRef.current.scale;
+      zoomPreviewAt(point.clientX, point.clientY, originScale * event.scale);
+    };
+
+    const handleGlobalGestureEnd = (event) => {
+      if (handledGestureEvents.has(event)) return;
+      handledGestureEvents.add(event);
+
+      if (event.cancelable) event.preventDefault();
+      gestureStateRef.current = null;
+      const point = getEventPoint(event);
+      recordInputProbe(event, 'gesture-end', point, isPointInPreview(point));
+      endPreviewInteractionSoon();
+    };
+
+    previewArea.addEventListener('pointerdown', handleNativePointerDown, { capture: true, passive: true });
+    window.addEventListener('pointermove', handleNativePointerMove, { capture: true, passive: true });
+    window.addEventListener('pointerrawupdate', handleNativePointerMove, { capture: true, passive: true });
+    window.addEventListener('pointerup', handleNativePointerUp, { capture: true, passive: true });
+    window.addEventListener('pointercancel', handleNativePointerUp, { capture: true, passive: true });
+    window.addEventListener('blur', clearNativePointers);
+    window.addEventListener('mousemove', updateLastInputPoint, { capture: true, passive: true });
+
+    const nativeZoomTargets = [
+      window,
+      document,
+      document.documentElement,
+      document.body,
+    ].filter(Boolean);
+
+    for (const target of nativeZoomTargets) {
+      target.addEventListener('gesturestart', handleGlobalGestureStart, { capture: true, passive: false });
+      target.addEventListener('gesturechange', handleGlobalGestureChange, { capture: true, passive: false });
+      target.addEventListener('gestureend', handleGlobalGestureEnd, { capture: true, passive: false });
+    }
+
+    return () => {
+      previewArea.removeEventListener('pointerdown', handleNativePointerDown, { capture: true });
+      window.removeEventListener('pointermove', handleNativePointerMove, { capture: true });
+      window.removeEventListener('pointerrawupdate', handleNativePointerMove, { capture: true });
+      window.removeEventListener('pointerup', handleNativePointerUp, { capture: true });
+      window.removeEventListener('pointercancel', handleNativePointerUp, { capture: true });
+      window.removeEventListener('blur', clearNativePointers);
+      window.removeEventListener('mousemove', updateLastInputPoint, { capture: true });
+
+      for (const target of nativeZoomTargets) {
+        target.removeEventListener('gesturestart', handleGlobalGestureStart, { capture: true });
+        target.removeEventListener('gesturechange', handleGlobalGestureChange, { capture: true });
+        target.removeEventListener('gestureend', handleGlobalGestureEnd, { capture: true });
+      }
+      if (transformFrameRef.current !== null) {
+        cancelAnimationFrame(transformFrameRef.current);
+      }
+      if (interactionEndTimerRef.current !== null) {
+        clearTimeout(interactionEndTimerRef.current);
+        interactionEndTimerRef.current = null;
+      }
+    };
+  }, [inputDebugEnabled, loading, error]);
+
+  const handlePreviewWheelCapture = (event) => {
+    const nativeEvent = event.nativeEvent || event;
+    const previewArea = previewAreaRef.current;
+    if (!previewArea) return;
+
+    if (Number.isFinite(nativeEvent.clientX) && Number.isFinite(nativeEvent.clientY)) {
+      lastInputPointRef.current = {
+        clientX: nativeEvent.clientX,
+        clientY: nativeEvent.clientY,
+      };
+    }
+
+    const previewRect = previewArea.getBoundingClientRect();
+    const point =
+      Number.isFinite(nativeEvent.clientX) &&
+      Number.isFinite(nativeEvent.clientY) &&
+      (nativeEvent.clientX !== 0 || nativeEvent.clientY !== 0)
+        ? { clientX: nativeEvent.clientX, clientY: nativeEvent.clientY, source: 'event' }
+        : lastInputPointRef.current
+          ? { ...lastInputPointRef.current, source: 'last-pointer' }
+          : {
+              clientX: previewRect.left + previewRect.width / 2,
+              clientY: previewRect.top + previewRect.height / 2,
+              source: 'preview-center',
+            };
+
+    const isInPreview =
+      point.clientX >= previewRect.left &&
+      point.clientX <= previewRect.right &&
+      point.clientY >= previewRect.top &&
+      point.clientY <= previewRect.bottom;
+    if (!isInPreview) return;
+
+    const isHorizontalSwipe = Math.abs(nativeEvent.deltaX) > Math.abs(nativeEvent.deltaY);
+    if (!nativeEvent.ctrlKey && isHorizontalSwipe) return;
+
+    beginPreviewInteraction();
+    if (inputDebugEnabled) {
+      setInputProbe({
+        phase: 'preview-wheel-react',
+        type: nativeEvent.type,
+        ctrlKey: Boolean(nativeEvent.ctrlKey),
+        cancelable: Boolean(nativeEvent.cancelable),
+        defaultPrevented: Boolean(nativeEvent.defaultPrevented),
+        inPreview: true,
+        pointSource: point.source,
+        clientX: Math.round(point.clientX),
+        clientY: Math.round(point.clientY),
+        deltaX: Math.round(nativeEvent.deltaX ?? 0),
+        deltaY: Math.round(nativeEvent.deltaY ?? 0),
+        scale: '',
+        visualScale: window.visualViewport?.scale?.toFixed(3) || '1.000',
+        target: [
+          nativeEvent.target?.tagName?.toLowerCase(),
+          nativeEvent.target?.className && typeof nativeEvent.target.className === 'string'
+            ? `.${nativeEvent.target.className.split(' ').filter(Boolean).slice(0, 2).join('.')}`
+            : '',
+        ].filter(Boolean).join(''),
+        time: new Date().toLocaleTimeString(),
+      });
+    }
+
+    const zoomDelta = Math.exp(-nativeEvent.deltaY * 0.0012);
+    zoomPreviewAt(point.clientX, point.clientY, transformRef.current.scale * zoomDelta);
+    endPreviewInteractionSoon();
+  };
 
   // --- Render Components inside SVG for a single Sphere ---
   const renderSphere = (isNorth) => {
@@ -191,7 +784,7 @@ function App() {
 
     // 1. Filter visible stars
     const visibleStars = stars.filter(s => {
-      if (s.mag > magLimit) return false;
+      if (!isStarVisible(s)) return false;
       return isNorth ? s.dec >= limitDec : s.dec <= limitDec;
     });
 
@@ -238,6 +831,19 @@ function App() {
     const mwOuterPath = getRibbonPath(mwOuterPos, mwOuterNeg);
     const mwInnerPath = getRibbonPath(mwInnerPos, mwInnerNeg);
 
+    const boundaryPath = boundarySegments
+      .filter(([a, b]) => {
+        const aVisible = isNorth ? a.dec >= limitDec : a.dec <= limitDec;
+        const bVisible = isNorth ? b.dec >= limitDec : b.dec <= limitDec;
+        return aVisible || bVisible;
+      })
+      .map(([a, b]) => {
+        const p1 = projectFn(a.ra, a.dec);
+        const p2 = projectFn(b.ra, b.dec);
+        return `M ${p1.x.toFixed(2)} ${p1.y.toFixed(2)} L ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+      })
+      .join(' ');
+
     // 7. Labels Processing with Collision Avoidance
     const labelCandidates = [];
 
@@ -253,10 +859,7 @@ function App() {
             // Distance from pole
             const distFromCenter = Math.sqrt(pt.x * pt.x + pt.y * pt.y);
             if (distFromCenter < R - 15) {
-              let text = "";
-              if (westernLabelMode === "en") text = con.nameEn;
-              else if (westernLabelMode === "zh") text = con.nameZh;
-              else text = `${con.nameZh} ${con.nameEn}`;
+              const text = getLocalizedText(con.nameZh, con.nameEn);
 
               labelCandidates.push({
                 id: `con-${con.abbr}`,
@@ -303,7 +906,7 @@ function App() {
       for (const star of starPoints) {
         // Only show names for bright stars
         if (star.mag <= 3.5) {
-          const name = showChineseLines ? star.nameZh || star.nameEn : star.nameEn || star.nameZh;
+          const name = getLocalizedText(star.nameZh, star.nameEn);
           if (name) {
             labelCandidates.push({
               id: `star-${star.hip}`,
@@ -445,22 +1048,19 @@ function App() {
             />
           )}
 
-          {/* Constellation Boundaries */}
-          {showWesternBoundaries && showWesternLines && Object.entries(boundaries).map(([abbr, pts]) => {
-            // Project all boundary points
-            const projectedPts = pts.map(pt => projectFn(pt.ra, pt.dec));
-            const pointsString = projectedPts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
-            return (
-              <polygon
-                key={`bound-${abbr}`}
-                points={pointsString}
-                fill="none"
-                stroke={activeTheme.constellations.boundary}
-                strokeWidth="0.7"
-                strokeDasharray={activeTheme.constellations.boundaryDash}
-              />
-            );
-          })}
+          {/* IAU constellation boundaries: render reconstructed short boundary segments, not closed polygons. */}
+          {showWesternBoundaries && boundaryPath && (
+            <path
+              d={boundaryPath}
+              fill="none"
+              stroke={activeTheme.constellations.boundary}
+              strokeWidth="0.55"
+              strokeDasharray={activeTheme.constellations.boundaryDash}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.7"
+            />
+          )}
 
           {/* Chinese Asterisms Lines */}
           {showChineseLines && chineseConstellations.map((ast, idx) => {
@@ -468,8 +1068,6 @@ function App() {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
               if (!s1 || !s2) return null;
-              // Check if both within magnitude limit and sphere
-              if (s1.mag > magLimit || s2.mag > magLimit) return null;
               const pt1 = projectFn(s1.ra, s1.dec);
               const pt2 = projectFn(s2.ra, s2.dec);
               return (
@@ -493,7 +1091,6 @@ function App() {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
               if (!s1 || !s2) return null;
-              if (s1.mag > magLimit || s2.mag > magLimit) return null;
               const pt1 = projectFn(s1.ra, s1.dec);
               const pt2 = projectFn(s2.ra, s2.dec);
               return (
@@ -655,9 +1252,9 @@ function App() {
 
     setTimeout(() => {
       try {
-        const scale = 3.5; // 3.5x scale -> 4200 x 5950 pixels (perfect for standard high-quality A1/A0 printing!)
-        const width = 1200 * scale;
-        const height = 1700 * scale;
+        const scale = 3.5; // 3.5x scale for print-quality landscape export.
+        const width = POSTER_WIDTH * scale;
+        const height = POSTER_HEIGHT * scale;
 
         const canvas = document.createElement('canvas');
         canvas.width = width;
@@ -709,6 +1306,20 @@ function App() {
     );
   }
 
+  const ToggleRow = ({ checked, onChange, children, indented = false, muted = false }) => (
+    <label className="toggle-row" style={indented ? { paddingLeft: '14px' } : undefined}>
+      <span style={muted ? { opacity: 0.8 } : undefined}>{children}</span>
+      <span className="switch">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span className="slider-switch"></span>
+      </span>
+    </label>
+  );
+
   return (
     <div className="app-container">
       {/* Toast Notice */}
@@ -747,6 +1358,18 @@ function App() {
               >
                 <option value="serif">Lora / 宋体 (衬线古典)</option>
                 <option value="sans">Outfit / 黑体 (无衬线现代)</option>
+              </select>
+            </div>
+            <div className="form-field">
+              <label>画布语言标注</label>
+              <select
+                className="select-input"
+                value={labelLanguageMode}
+                onChange={(e) => setLabelLanguageMode(e.target.value)}
+              >
+                <option value="both">中文 + English</option>
+                <option value="zh">仅中文</option>
+                <option value="en">English only</option>
               </select>
             </div>
           </div>
@@ -799,17 +1422,48 @@ function App() {
             </div>
             <div className="form-field">
               <label>
-                恒星星等极限限制 <span className="value">{magLimit.toFixed(1)}m</span>
+                星等过滤范围 <span className="value">{formatMagFilterValue(minMagLimit)} - {formatMagFilterValue(magLimit)}</span>
               </label>
-              <input
-                type="range"
-                className="slider-input"
-                min="3.0"
-                max="6.5"
-                step="0.5"
-                value={magLimit}
-                onChange={(e) => setMagLimit(parseFloat(e.target.value))}
-              />
+              <div className="range-caption">
+                <span>最亮端</span>
+                <span>最暗端</span>
+              </div>
+              <div
+                className="dual-range"
+                style={{
+                  '--range-start': `${magRangeStart}%`,
+                  '--range-end': `${magRangeEnd}%`,
+                }}
+              >
+                <input
+                  type="range"
+                  className="dual-range-input"
+                  min={MAG_RANGE_MIN}
+                  max={MAG_RANGE_MAX}
+                  step={MAG_RANGE_STEP}
+                  value={minMagLimit}
+                  aria-label="最亮端星等"
+                  onChange={(e) => updateMinMagLimit(Number(e.target.value))}
+                />
+                <input
+                  type="range"
+                  className="dual-range-input"
+                  min={MAG_RANGE_MIN}
+                  max={MAG_RANGE_MAX}
+                  step={MAG_RANGE_STEP}
+                  value={magLimit}
+                  aria-label="最暗端星等"
+                  onChange={(e) => updateMagLimit(Number(e.target.value))}
+                />
+              </div>
+              <div className="range-scale">
+                {MAG_RANGE_TICKS.map((tick) => (
+                  <span key={tick}>{formatMagFilterValue(tick)}</span>
+                ))}
+              </div>
+              <p className="control-tip">
+                仅过滤背景星；星座/星官连线用星始终保留。
+              </p>
             </div>
             <div className="form-field">
               <label>
@@ -859,107 +1513,57 @@ function App() {
           <div className="control-group">
             <h3 className="control-group-title">星空图层显示开关</h3>
             
-            <div className="toggle-row" onClick={() => setShowWesternLines(!showWesternLines)}>
-              <span>现代西方星座连线</span>
-              <label className="switch">
-                <input type="checkbox" checked={showWesternLines} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showWesternLines} onChange={setShowWesternLines}>
+              现代西方星座连线
+            </ToggleRow>
+
+            <ToggleRow checked={showWesternBoundaries} onChange={setShowWesternBoundaries}>
+              IAU 现代星座边界线
+            </ToggleRow>
 
             {showWesternLines && (
               <>
-                <div className="toggle-row" style={{ paddingLeft: '14px' }} onClick={() => setShowWesternBoundaries(!showWesternBoundaries)}>
-                  <span style={{ opacity: 0.8 }}>IAU 现代星座边界线</span>
-                  <label className="switch">
-                    <input type="checkbox" checked={showWesternBoundaries} readOnly />
-                    <span className="slider-switch"></span>
-                  </label>
-                </div>
-                <div className="toggle-row" style={{ paddingLeft: '14px' }} onClick={() => setShowWesternNames(!showWesternNames)}>
-                  <span style={{ opacity: 0.8 }}>星座名称文字标注</span>
-                  <label className="switch">
-                    <input type="checkbox" checked={showWesternNames} readOnly />
-                    <span className="slider-switch"></span>
-                  </label>
-                </div>
-                {showWesternNames && (
-                  <div className="form-field" style={{ paddingLeft: '14px' }}>
-                    <select
-                      className="select-input"
-                      value={westernLabelMode}
-                      onChange={(e) => setWesternLabelMode(e.target.value)}
-                      style={{ padding: '4px', fontSize: '11px' }}
-                    >
-                      <option value="both">中文 + 英文</option>
-                      <option value="zh">仅中文</option>
-                      <option value="en">仅英文</option>
-                    </select>
-                  </div>
-                )}
+                <ToggleRow checked={showWesternNames} onChange={setShowWesternNames} indented muted>
+                  星座名称文字标注
+                </ToggleRow>
               </>
             )}
 
-            <div className="toggle-row" onClick={() => {
-              setShowChineseLines(!showChineseLines);
-              setShowChineseNames(!showChineseLines); // toggle names too
-            }}>
-              <span>中国传统星官连线 (三垣二十八宿)</span>
-              <label className="switch">
-                <input type="checkbox" checked={showChineseLines} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow
+              checked={showChineseLines}
+              onChange={(checked) => {
+                setShowChineseLines(checked);
+                setShowChineseNames(checked);
+              }}
+            >
+              中国传统星官连线 (三垣二十八宿)
+            </ToggleRow>
 
             {showChineseLines && (
-              <div className="toggle-row" style={{ paddingLeft: '14px' }} onClick={() => setShowChineseNames(!showChineseNames)}>
-                <span style={{ opacity: 0.8 }}>星官中文名称标注</span>
-                <label className="switch">
-                  <input type="checkbox" checked={showChineseNames} readOnly />
-                  <span className="slider-switch"></span>
-                </label>
-              </div>
+              <ToggleRow checked={showChineseNames} onChange={setShowChineseNames} indented muted>
+                星官中文名称标注
+              </ToggleRow>
             )}
 
-            <div className="toggle-row" onClick={() => setShowGrid(!showGrid)}>
-              <span>赤经赤纬度网格经纬线</span>
-              <label className="switch">
-                <input type="checkbox" checked={showGrid} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showGrid} onChange={setShowGrid}>
+              赤经赤纬度网格经纬线
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowEquator(!showEquator)}>
-              <span>天球赤道圈 reference line</span>
-              <label className="switch">
-                <input type="checkbox" checked={showEquator} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showEquator} onChange={setShowEquator}>
+              天球赤道圈 reference line
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowEcliptic(!showEcliptic)}>
-              <span>黄道带轨道 (太阳周年视运动)</span>
-              <label className="switch">
-                <input type="checkbox" checked={showEcliptic} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showEcliptic} onChange={setShowEcliptic}>
+              黄道带轨道 (太阳周年视运动)
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowMilkyWay(!showMilkyWay)}>
-              <span>银道 Milky Way 银河带</span>
-              <label className="switch">
-                <input type="checkbox" checked={showMilkyWay} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showMilkyWay} onChange={setShowMilkyWay}>
+              银道 Milky Way 银河带
+            </ToggleRow>
 
-            <div className="toggle-row" onClick={() => setShowStarNames(!showStarNames)}>
-              <span>亮恒星名称标注 (e.g. 织女一/Vega)</span>
-              <label className="switch">
-                <input type="checkbox" checked={showStarNames} readOnly />
-                <span className="slider-switch"></span>
-              </label>
-            </div>
+            <ToggleRow checked={showStarNames} onChange={setShowStarNames}>
+              亮恒星名称标注 (e.g. 织女一/Vega)
+            </ToggleRow>
           </div>
 
           {/* Export Actions */}
@@ -982,28 +1586,35 @@ function App() {
       </aside>
 
       {/* Main Preview Area */}
-      <main className="preview-area">
-        <div className="poster-mockup">
+      <main
+        ref={previewAreaRef}
+        className="preview-area"
+        onWheelCapture={handlePreviewWheelCapture}
+      >
+        <div
+          ref={posterMockupRef}
+          className="poster-mockup"
+        >
           <div className="poster-svg-wrapper">
             {/* The absolute master SVG */}
             <svg
               id="poster-svg"
-              viewBox="0 0 1200 1700"
-              width="1200"
-              height="1700"
+              viewBox={`0 0 ${POSTER_WIDTH} ${POSTER_HEIGHT}`}
+              width={POSTER_WIDTH}
+              height={POSTER_HEIGHT}
               xmlns="http://www.w3.org/2000/svg"
             >
               {/* Poster Board Fill */}
-              <rect width="1200" height="1700" fill={activeTheme.posterBg} />
+              <rect width={POSTER_WIDTH} height={POSTER_HEIGHT} fill={activeTheme.posterBg} />
 
               {/* Decorative Poster Borders */}
               {/* Outer frame border */}
-              <rect x="25" y="25" width="1150" height="1650" fill="none" stroke={activeTheme.border} strokeWidth="3" />
+              <rect x="25" y="25" width={POSTER_WIDTH - 50} height={POSTER_HEIGHT - 50} fill="none" stroke={activeTheme.border} strokeWidth="3" />
               {/* Inner thin border */}
-              <rect x="33" y="33" width="1134" height="1634" fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
+              <rect x="33" y="33" width={POSTER_WIDTH - 66} height={POSTER_HEIGHT - 66} fill="none" stroke={activeTheme.border} strokeWidth="0.8" opacity="0.6" />
 
               {/* Poster Title Block */}
-              <g transform="translate(600, 110)">
+              <g transform={`translate(${POSTER_WIDTH / 2}, 95)`}>
                 <text
                   x="0"
                   y="0"
@@ -1045,7 +1656,7 @@ function App() {
               </g>
 
               {/* 1. NORTHERN CELESTIAL ATMOSPHERE */}
-              <g transform="translate(600, 520)">
+              <g transform="translate(455, 525)">
                 {renderSphere(true)}
                 <text
                   x="0"
@@ -1057,12 +1668,12 @@ function App() {
                   fontWeight="bold"
                   letterSpacing="2.5"
                 >
-                  NORTHERN CELESTIAL ATMOSPHERE / 北天恒星图
+                  {getLocalizedText('北天恒星图', 'NORTHERN CELESTIAL ATMOSPHERE', 'en-first')}
                 </text>
               </g>
 
               {/* 2. SOUTHERN CELESTIAL ATMOSPHERE */}
-              <g transform="translate(600, 1205)">
+              <g transform="translate(1245, 525)">
                 {renderSphere(false)}
                 <text
                   x="0"
@@ -1074,18 +1685,18 @@ function App() {
                   fontWeight="bold"
                   letterSpacing="2.5"
                 >
-                  SOUTHERN CELESTIAL ATMOSPHERE / 南天恒星图
+                  {getLocalizedText('南天恒星图', 'SOUTHERN CELESTIAL ATMOSPHERE', 'en-first')}
                 </text>
               </g>
 
               {/* Poster Bottom Info: Legend & Stars Catalog Table */}
-              <g transform="translate(80, 1575)">
+              <g transform="translate(90, 1025)">
                 {/* Divider Line */}
-                <line x1="0" y1="-10" x2="1040" y2="-10" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
+                <line x1="0" y1="-10" x2="1520" y2="-10" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
 
                 {/* Left side: Legend */}
                 <g transform="translate(15, 10)">
-                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">MAP LEGEND / 星图图例</text>
+                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">{getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}</text>
                   
                   {/* Star magnitude legend scales */}
                   <g transform="translate(0, 26)">
@@ -1114,41 +1725,41 @@ function App() {
                   <g transform="translate(290, 10)" fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                     <g transform="translate(0, 0)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />
-                      <text x="35" y="3.5">Celestial Equator / 天球赤道</text>
+                      <text x="35" y="3.5">{getLocalizedText('天球赤道', 'Celestial Equator', 'en-first')}</text>
                     </g>
                     <g transform="translate(0, 15)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.ecliptic.color} strokeWidth="1.2" strokeDasharray={activeTheme.ecliptic.dash} />
-                      <text x="35" y="3.5">Ecliptic Path / 黄道轨道</text>
+                      <text x="35" y="3.5">{getLocalizedText('黄道轨道', 'Ecliptic Path', 'en-first')}</text>
                     </g>
                     <g transform="translate(0, 30)">
                       <rect x="0" y="-4" width="25" height="8" fill={activeTheme.galactic.fill} stroke={activeTheme.galactic.stroke} strokeWidth="0.8" strokeDasharray="2 3" />
-                      <text x="35" y="3.5">Milky Way Plane / 银道带</text>
+                      <text x="35" y="3.5">{getLocalizedText('银道带', 'Milky Way Plane', 'en-first')}</text>
                     </g>
                   </g>
                   
                   <g transform="translate(485, 10)" fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
                     <g transform="translate(0, 0)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.line} strokeWidth="1" opacity={activeTheme.constellations.lineOpacity} />
-                      <text x="35" y="3.5">Constellation Line / 星座连线</text>
+                      <text x="35" y="3.5">{getLocalizedText('星座连线', 'Constellation Line', 'en-first')}</text>
                     </g>
                     <g transform="translate(0, 15)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.boundary} strokeWidth="0.8" strokeDasharray={activeTheme.constellations.boundaryDash} />
-                      <text x="35" y="3.5">IAU Boundary / 星座边界</text>
+                      <text x="35" y="3.5">{getLocalizedText('星座边界', 'IAU Boundary', 'en-first')}</text>
                     </g>
                     <g transform="translate(0, 30)">
                       <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.chinese.line} strokeWidth="1" opacity={activeTheme.chinese.lineOpacity} />
-                      <text x="35" y="3.5">Chinese Asterism / 星官连线</text>
+                      <text x="35" y="3.5">{getLocalizedText('星官连线', 'Chinese Asterism', 'en-first')}</text>
                     </g>
                   </g>
                 </g>
 
                 {/* Right side: Stars Catalog Table */}
-                <g transform="translate(720, 10)">
-                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">BRIGHT CELESTIAL BODIES / 亮恒星星表</text>
+                <g transform="translate(1040, 10)">
+                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize="12" fontWeight="bold" letterSpacing="1.5">{getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}</text>
                   
                   {/* Table Header */}
                   <g transform="translate(0, 20)" fontSize="8" fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
-                    <text x="0" y="0">STAR NAME / 恒星名称</text>
+                    <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
                     <text x="140" y="0">MAG</text>
                     <text x="180" y="0">R.A.</text>
                     <text x="240" y="0">DEC.</text>
@@ -1165,7 +1776,7 @@ function App() {
                                           star.colorIdx < 1.3 ? 'K' : 'M';
                     return (
                       <g key={`table-row-${i}`} transform={`translate(0, ${y})`} fontSize="8.5" fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
-                        <text x="0" y="0" fontWeight="500">{star.nameZh || star.nameEn} ({star.nameEn})</text>
+                        <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
                         <text x="140" y="0">{star.mag.toFixed(2)}</text>
                         <text x="180" y="0">{formatRA(star.ra)}</text>
                         <text x="240" y="0">{formatDec(star.dec)}</text>
@@ -1179,6 +1790,17 @@ function App() {
           </div>
         </div>
       </main>
+      {inputDebugEnabled && inputProbe && (
+        <div className="input-probe" aria-live="polite">
+          <div>phase: {inputProbe.phase}</div>
+          <div>event: {inputProbe.type} ctrl={String(inputProbe.ctrlKey)}</div>
+          <div>cancelable={String(inputProbe.cancelable)} prevented={String(inputProbe.defaultPrevented)}</div>
+          <div>preview={String(inputProbe.inPreview)} point={inputProbe.clientX},{inputProbe.clientY} ({inputProbe.pointSource})</div>
+          <div>delta={inputProbe.deltaX},{inputProbe.deltaY} scale={inputProbe.scale || '-'}</div>
+          <div>viewport={inputProbe.visualScale} target={inputProbe.target || '-'}</div>
+          <div>{inputProbe.time}</div>
+        </div>
+      )}
     </div>
   );
 }
