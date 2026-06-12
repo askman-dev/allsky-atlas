@@ -185,25 +185,61 @@ export function getVisibleSkyOverlay({
   latitudeDeg,
   longitudeDeg,
   timestampMs,
+  timeWindowHours = 6,
+  sampleStepMinutes = 30,
   cellSizeDeg = 4,
 }) {
-  const localSiderealDeg = getLocalSiderealDegrees(timestampMs, longitudeDeg);
   const visibleCellPaths = [];
+  const outlinePaths = [];
   const decMin = isNorth ? limitDec : -90;
   const decMax = isNorth ? 90 : limitDec;
+  const halfWindowMs = (timeWindowHours * 60 * 60 * 1000) / 2;
+  const sampleStepMs = sampleStepMinutes * 60 * 1000;
+  const sampleSiderealDegrees = [];
 
+  for (
+    let sampleTimestampMs = timestampMs - halfWindowMs;
+    sampleTimestampMs <= timestampMs + halfWindowMs + 1;
+    sampleTimestampMs += sampleStepMs
+  ) {
+    sampleSiderealDegrees.push(getLocalSiderealDegrees(sampleTimestampMs, longitudeDeg));
+  }
+
+  const decBands = [];
   for (let dec = decMin; dec < decMax; dec += cellSizeDeg) {
-    const nextDec = Math.min(dec + cellSizeDeg, decMax);
+    decBands.push({
+      dec,
+      nextDec: Math.min(dec + cellSizeDeg, decMax),
+    });
+  }
+
+  const raBands = [];
+  for (let ra = 0; ra < 360; ra += cellSizeDeg) {
+    raBands.push({
+      ra,
+      nextRa: Math.min(ra + cellSizeDeg, 360),
+    });
+  }
+
+  const visibleGrid = decBands.map(() => raBands.map(() => false));
+
+  for (let row = 0; row < decBands.length; row++) {
+    const { dec, nextDec } = decBands[row];
     const centerDec = (dec + nextDec) / 2;
 
-    for (let ra = 0; ra < 360; ra += cellSizeDeg) {
-      const nextRa = ra + cellSizeDeg;
-      const centerRa = normalizeDegrees(ra + cellSizeDeg / 2);
+    for (let col = 0; col < raBands.length; col++) {
+      const { ra, nextRa } = raBands[col];
+      const centerRa = normalizeDegrees((ra + nextRa) / 2);
 
-      if (getEquatorialAltitudeDegrees(centerRa, centerDec, latitudeDeg, localSiderealDeg) < 0) {
+      const visibleInWindow = sampleSiderealDegrees.some((localSiderealDeg) => (
+        getEquatorialAltitudeDegrees(centerRa, centerDec, latitudeDeg, localSiderealDeg) >= 0
+      ));
+
+      if (!visibleInWindow) {
         continue;
       }
 
+      visibleGrid[row][col] = true;
       const corners = [
         projectFn(ra, dec),
         projectFn(nextRa, dec),
@@ -214,28 +250,44 @@ export function getVisibleSkyOverlay({
     }
   }
 
-  const horizonPaths = [];
-  let currentSegment = [];
-  for (let i = 0; i <= 240; i++) {
-    const eq = horizontalToEquatorial((i * 360) / 240, 0, latitudeDeg, localSiderealDeg);
-    const inProjectedHemisphere = isNorth ? eq.dec >= limitDec : eq.dec <= limitDec;
-    if (inProjectedHemisphere) {
-      currentSegment.push(projectFn(eq.ra, eq.dec));
-    } else if (currentSegment.length > 1) {
-      horizonPaths.push(pathFromProjectedPoints(currentSegment));
-      currentSegment = [];
-    } else {
-      currentSegment = [];
+  const addOutlineSegment = (a, b) => {
+    outlinePaths.push(pathFromProjectedPoints([a, b]));
+  };
+
+  const rowCount = decBands.length;
+  const colCount = raBands.length;
+
+  for (let row = 0; row < rowCount; row++) {
+    const { dec, nextDec } = decBands[row];
+    for (let col = 0; col < colCount; col++) {
+      if (!visibleGrid[row][col]) continue;
+
+      const { ra, nextRa } = raBands[col];
+      const prevCol = (col - 1 + colCount) % colCount;
+      const nextCol = (col + 1) % colCount;
+      const lowerRowVisible = row > 0 && visibleGrid[row - 1][col];
+      const upperRowVisible = row < rowCount - 1 && visibleGrid[row + 1][col];
+      const leftColVisible = visibleGrid[row][prevCol];
+      const rightColVisible = visibleGrid[row][nextCol];
+
+      if (!lowerRowVisible) {
+        addOutlineSegment(projectFn(ra, dec), projectFn(nextRa, dec));
+      }
+      if (!upperRowVisible) {
+        addOutlineSegment(projectFn(ra, nextDec), projectFn(nextRa, nextDec));
+      }
+      if (!leftColVisible) {
+        addOutlineSegment(projectFn(ra, dec), projectFn(ra, nextDec));
+      }
+      if (!rightColVisible) {
+        addOutlineSegment(projectFn(nextRa, dec), projectFn(nextRa, nextDec));
+      }
     }
-  }
-  if (currentSegment.length > 1) {
-    horizonPaths.push(pathFromProjectedPoints(currentSegment));
   }
 
   return {
     visibleAreaPath: visibleCellPaths.join(' '),
-    horizonPaths,
-    localSiderealDeg,
+    horizonPaths: outlinePaths,
   };
 }
 

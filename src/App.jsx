@@ -178,6 +178,7 @@ const UI_TEXT = {
     observerHour: 'Local Hour',
     observerMonth: 'Month',
     observerCityHint: 'City dots set latitude and longitude',
+    observerHourHint: 'Visible sky shows the 6-hour window from 3 hours before to 3 hours after the selected hour.',
     exportSvg: 'Export Vector SVG',
     exportPng: 'Export Print PNG',
     exportTiledPdf: 'Export A4 Tiled PDF',
@@ -255,6 +256,7 @@ const UI_TEXT = {
     observerHour: '本地小时',
     observerMonth: '月份',
     observerCityHint: '点击城市点会同时设置纬度和经度',
+    observerHourHint: '肉眼可见天空会绘制所选小时前 3 小时到后 3 小时的 6 小时范围。',
     exportSvg: '导出无损矢量 SVG',
     exportPng: '导出印刷级高清 PNG',
     exportTiledPdf: '导出 A4 拼接 PDF',
@@ -787,11 +789,10 @@ function App() {
   const getVisibleSkyParameterText = () => {
     const lat = formatSignedDegree(renderSettings.observerLatitude, 'N', 'S');
     const lon = formatSignedDegree(renderSettings.observerLongitude, 'E', 'W');
-    const dateText = `${renderSettings.observerMonth}/${renderSettings.observerDay}`;
-    const hourText = `${String(renderSettings.observerHour).padStart(2, '0')}:00`;
+    const timeRangeText = getVisibleSkyTimeRangeText();
     return getLocalizedText(
-      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 日期 ${dateText}, 本地时间 ${hourText} 在地平线以上的星空区域。`,
-      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Date ${dateText}, Local time ${hourText}.`,
+      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 本地时间 ${timeRangeText} 在地平线以上的星空区域。`,
+      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Local time ${timeRangeText}.`,
       'en-first'
     );
   };
@@ -811,6 +812,17 @@ function App() {
     star.colorIdx < 0.8 ? 'G' :
     star.colorIdx < 1.3 ? 'K' : 'M'
   );
+
+  const formatDateHour = (date) => (
+    `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:00`
+  );
+
+  const getVisibleSkyTimeRangeText = () => {
+    const center = new Date(renderSettings.observerTimestampMs);
+    const start = new Date(center.getTime() - 3 * 60 * 60 * 1000);
+    const end = new Date(center.getTime() + 3 * 60 * 60 * 1000);
+    return `${formatDateHour(start)}-${formatDateHour(end)}`;
+  };
 
   const estimateSvgTextWidth = (text, fontSize) => {
     let width = 0;
@@ -2964,6 +2976,7 @@ function App() {
                 value={observerHour}
                 onChange={(e) => updateObserverHour(Number(e.target.value))}
               />
+              <p className="field-hint">{uiText.observerHourHint}</p>
             </div>
             <div className="form-field">
               <label>
