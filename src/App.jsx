@@ -780,6 +780,22 @@ function App() {
     return `${sign}${degrees.toString().padStart(2, '0')}°${minutes.toString().padStart(2, '0')}'`;
   };
 
+  const formatSignedDegree = (value, positiveSuffix, negativeSuffix) => (
+    `${Math.abs(value).toFixed(1)}°${value >= 0 ? positiveSuffix : negativeSuffix}`
+  );
+
+  const getVisibleSkyParameterText = () => {
+    const lat = formatSignedDegree(renderSettings.observerLatitude, 'N', 'S');
+    const lon = formatSignedDegree(renderSettings.observerLongitude, 'E', 'W');
+    const dateText = `${renderSettings.observerMonth}/${renderSettings.observerDay}`;
+    const hourText = `${String(renderSettings.observerHour).padStart(2, '0')}:00`;
+    return getLocalizedText(
+      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 日期 ${dateText}, 本地时间 ${hourText} 在地平线以上的星空区域。`,
+      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Date ${dateText}, Local time ${hourText}.`,
+      'en-first'
+    );
+  };
+
   const getLocalizedText = (zh, en, order = 'zh-first') => {
     if (renderLabelLanguageMode === "zh") return zh || en || "";
     if (renderLabelLanguageMode === "en" || renderLabelLanguageMode === "both") return en || zh || "";
@@ -787,6 +803,193 @@ function App() {
     const secondary = order === 'en-first' ? zh : en;
     return [primary, secondary].filter(Boolean).join(' / ');
   };
+
+  const getSpectralClass = (star) => (
+    star.colorIdx < -0.1 ? 'O/B' :
+    star.colorIdx < 0.3 ? 'A' :
+    star.colorIdx < 0.5 ? 'F' :
+    star.colorIdx < 0.8 ? 'G' :
+    star.colorIdx < 1.3 ? 'K' : 'M'
+  );
+
+  const estimateSvgTextWidth = (text, fontSize) => {
+    let width = 0;
+    for (const char of text) {
+      if (/[\u4e00-\u9fff]/.test(char)) width += fontSize;
+      else if (/[A-Z0-9]/.test(char)) width += fontSize * 0.62;
+      else if (/[a-z]/.test(char)) width += fontSize * 0.55;
+      else if (/\s/.test(char)) width += fontSize * 0.35;
+      else width += fontSize * 0.5;
+    }
+    return width;
+  };
+
+  const wrapSvgText = (text, maxWidth, fontSize) => {
+    if (!maxWidth) return [text];
+    const hasWhitespace = /\s/.test(text);
+    const tokens = hasWhitespace ? text.split(/(\s+)/).filter(Boolean) : [...text];
+    const lines = [];
+    let currentLine = '';
+
+    for (const token of tokens) {
+      const nextLine = currentLine ? `${currentLine}${token}` : token;
+      if (currentLine && estimateSvgTextWidth(nextLine, fontSize) > maxWidth) {
+        lines.push(currentLine.trimEnd());
+        currentLine = token.trimStart();
+      } else {
+        currentLine = nextLine;
+      }
+    }
+
+    if (currentLine) lines.push(currentLine.trimEnd());
+    return lines;
+  };
+
+  const renderMapLegend = ({ keyPrefix, starSpacing = 45, lineColumnX = 195, lineRowGap = 15, titleLetterSpacing = 1.5 }) => {
+    const lineLegendItems = [
+      {
+        key: 'equator',
+        label: getLocalizedText('天球赤道', 'Celestial Equator', 'en-first'),
+        sample: <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />,
+        column: 0,
+        row: 0,
+      },
+      {
+        key: 'ecliptic',
+        label: getLocalizedText('黄道轨道', 'Ecliptic Path', 'en-first'),
+        sample: <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.ecliptic.color} strokeWidth="1.2" strokeDasharray={activeTheme.ecliptic.dash} />,
+        column: 0,
+        row: 1,
+      },
+      {
+        key: 'milky-way',
+        label: getLocalizedText('银道带', 'Milky Way Plane', 'en-first'),
+        sample: <rect x="0" y="-4" width="25" height="8" fill={activeTheme.galactic.fill} stroke={activeTheme.galactic.stroke} strokeWidth="0.8" strokeDasharray="2 3" />,
+        column: 0,
+        row: 2,
+      },
+      {
+        key: 'constellation-line',
+        label: getLocalizedText('星座连线', 'Constellation Line', 'en-first'),
+        sample: <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.line} strokeWidth="1" opacity={activeTheme.constellations.lineOpacity} />,
+        column: 1,
+        row: 0,
+      },
+      {
+        key: 'boundary',
+        label: getLocalizedText('星座边界', 'IAU Boundary', 'en-first'),
+        sample: <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.boundary} strokeWidth="0.8" strokeDasharray={activeTheme.constellations.boundaryDash} />,
+        column: 1,
+        row: 1,
+      },
+      {
+        key: 'chinese-asterism',
+        label: getLocalizedText('星官连线', 'Chinese Asterism', 'en-first'),
+        sample: <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.chinese.line} strokeWidth="1" opacity={activeTheme.chinese.lineOpacity} />,
+        column: 1,
+        row: 2,
+      },
+    ];
+
+    return (
+      <g>
+        <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing={titleLetterSpacing}>
+          {getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}
+        </text>
+        <g transform="translate(0, 26)">
+          {[1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map((mag, i) => {
+            const r = Math.max(0.5, 4.5 - 0.6 * mag);
+            const xOffset = i * starSpacing;
+            const isRetro = activeTheme.stars.retroRings;
+
+            return (
+              <g key={`${keyPrefix}-leg-star-${i}`} transform={`translate(${xOffset}, 0)`}>
+                {isRetro ? (
+                  <g>
+                    <circle cx="0" cy="0" r={Math.max(0.5, 2.0 - 0.25 * mag)} fill="#201e1a" />
+                    <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
+                  </g>
+                ) : (
+                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, renderThemeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
+                )}
+                <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
+              </g>
+            );
+          })}
+        </g>
+        <g transform="translate(0, 62)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+          {lineLegendItems.map((item) => (
+            <g key={`${keyPrefix}-line-${item.key}`} transform={`translate(${item.column * lineColumnX}, ${item.row * lineRowGap})`}>
+              {item.sample}
+              <text x="35" y="3.5">{item.label}</text>
+            </g>
+          ))}
+        </g>
+      </g>
+    );
+  };
+
+  const renderUsageGuide = ({ titleLetterSpacing = 1.5, maxTextWidth = null }) => {
+    const bodyFontSize = activeTypography.legendSmall;
+    const visibleSkyLines = renderShowVisibleSky
+      ? wrapSvgText(getVisibleSkyParameterText(), maxTextWidth, bodyFontSize)
+      : [];
+    const sourceY = renderShowVisibleSky ? 71 + visibleSkyLines.length * 13 : 71;
+
+    return (
+      <g>
+        <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing={titleLetterSpacing}>
+          {getLocalizedText('使用指南', 'USAGE GUIDE', 'en-first')}
+        </text>
+        <text x="0" y="28" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
+          {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
+        </text>
+        <text x="0" y="41" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
+          {getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')}
+        </text>
+        <text x="0" y="54" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
+          {getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
+        </text>
+        {visibleSkyLines.map((line, index) => (
+          <text key={`usage-visible-sky-${index}`} x="0" y={67 + index * 13} fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
+            {line}
+          </text>
+        ))}
+        <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
+          <text x="0" y={sourceY} fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
+            {getLocalizedText('开源项目：', 'Open source: ', 'en-first')}github.com/askman-dev/allsky-atlas
+          </text>
+        </a>
+      </g>
+    );
+  };
+
+  const renderBrightStarsTable = ({ keyPrefix, titleLetterSpacing = 1.5, headerY = 20, rowStartY = 33, rowGap = 11, columns = { mag: 140, ra: 180, dec: 240, sp: 290 } }) => (
+    <g>
+      <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing={titleLetterSpacing}>
+        {getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}
+      </text>
+      <g transform={`translate(0, ${headerY})`} fontSize={activeTypography.tableHeader} fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
+        <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
+        <text x={columns.mag} y="0">MAG</text>
+        <text x={columns.ra} y="0">R.A.</text>
+        <text x={columns.dec} y="0">DEC.</text>
+        <text x={columns.sp} y="0">SP.</text>
+      </g>
+      {brightestStars.map((star, i) => {
+        const y = rowStartY + i * rowGap;
+        return (
+          <g key={`${keyPrefix}-table-row-${i}`} transform={`translate(0, ${y})`} fontSize={activeTypography.tableBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
+            <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
+            <text x={columns.mag} y="0">{star.mag.toFixed(2)}</text>
+            <text x={columns.ra} y="0">{formatRA(star.ra)}</text>
+            <text x={columns.dec} y="0">{formatDec(star.dec)}</text>
+            <text x={columns.sp} y="0">{getSpectralClass(star)}</text>
+          </g>
+        );
+      })}
+    </g>
+  );
 
   // --- Poster dimensions and radius of the main circular spheres ---
   const landscapeLayout = POSTER_LAYOUTS.landscape_dual;
@@ -3064,122 +3267,17 @@ function App() {
 
                 {/* Left side: Legend */}
                 <g transform="translate(15, 10)">
-                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.5">{getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}</text>
-                  
-                  {/* Star magnitude legend scales */}
-                  <g transform="translate(0, 26)">
-                    {[1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map((mag, i) => {
-                      const r = Math.max(0.5, 4.5 - 0.6 * mag);
-                      const xOffset = i * 45;
-                      const isRetro = activeTheme.stars.retroRings;
-
-                      return (
-                        <g key={`leg-star-${i}`} transform={`translate(${xOffset}, 0)`}>
-                          {isRetro ? (
-                            <g>
-                              <circle cx="0" cy="0" r={Math.max(0.5, 2.0 - 0.25 * mag)} fill="#201e1a" />
-                              <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
-                            </g>
-                          ) : (
-                            <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, renderThemeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
-                          )}
-                          <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
-                        </g>
-                      );
-                    })}
-                  </g>
-
-                  {/* References lines legend */}
-                  <g transform="translate(290, 10)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
-                    <g transform="translate(0, 0)">
-                      <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />
-                      <text x="35" y="3.5">{getLocalizedText('天球赤道', 'Celestial Equator', 'en-first')}</text>
-                    </g>
-                    <g transform="translate(0, 15)">
-                      <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.ecliptic.color} strokeWidth="1.2" strokeDasharray={activeTheme.ecliptic.dash} />
-                      <text x="35" y="3.5">{getLocalizedText('黄道轨道', 'Ecliptic Path', 'en-first')}</text>
-                    </g>
-                    <g transform="translate(0, 30)">
-                      <rect x="0" y="-4" width="25" height="8" fill={activeTheme.galactic.fill} stroke={activeTheme.galactic.stroke} strokeWidth="0.8" strokeDasharray="2 3" />
-                      <text x="35" y="3.5">{getLocalizedText('银道带', 'Milky Way Plane', 'en-first')}</text>
-                    </g>
-                  </g>
-                  
-                  <g transform="translate(485, 10)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
-                    <g transform="translate(0, 0)">
-                      <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.line} strokeWidth="1" opacity={activeTheme.constellations.lineOpacity} />
-                      <text x="35" y="3.5">{getLocalizedText('星座连线', 'Constellation Line', 'en-first')}</text>
-                    </g>
-                    <g transform="translate(0, 15)">
-                      <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.constellations.boundary} strokeWidth="0.8" strokeDasharray={activeTheme.constellations.boundaryDash} />
-                      <text x="35" y="3.5">{getLocalizedText('星座边界', 'IAU Boundary', 'en-first')}</text>
-                    </g>
-                    <g transform="translate(0, 30)">
-                      <line x1="0" y1="0" x2="25" y2="0" stroke={activeTheme.chinese.line} strokeWidth="1" opacity={activeTheme.chinese.lineOpacity} />
-                      <text x="35" y="3.5">{getLocalizedText('星官连线', 'Chinese Asterism', 'en-first')}</text>
-                    </g>
-                  </g>
+                  {renderMapLegend({ keyPrefix: 'landscape', starSpacing: 45, lineColumnX: 195, lineRowGap: 15, titleLetterSpacing: 1.5 })}
                 </g>
 
-                {/* Source Code */}
-                <g transform="translate(15, 82)">
-                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.legendBody} fontWeight="bold" letterSpacing="1.2">
-                    {getLocalizedText('源代码', 'SOURCE CODE', 'en-first')}
-                  </text>
-                  <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
-                    <text x="0" y="15" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize={activeTypography.legendBody} fontWeight="600">
-                      github.com/askman-dev/allsky-atlas
-                    </text>
-                  </a>
-                </g>
-
-                {/* Map Terms */}
-                <g transform="translate(290, 82)">
-                  <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.legendBody} fontWeight="bold" letterSpacing="1.2">
-                    {getLocalizedText('名词解释', 'MAP TERMS', 'en-first')}
-                  </text>
-                  <text x="0" y="15" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
-                    {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
-                  </text>
-                  <text x="0" y="28" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
-                    {getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')}
-                  </text>
-                  <text x="0" y="41" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
-                    {getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
-                  </text>
+                {/* Usage Guide */}
+                <g transform="translate(520, 10)">
+                  {renderUsageGuide({ titleLetterSpacing: 1.5 })}
                 </g>
 
                 {/* Right side: Stars Catalog Table */}
                 <g transform="translate(1040, 10)">
-                  <text x="0" y="5" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.5">{getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}</text>
-                  
-                  {/* Table Header */}
-                  <g transform="translate(0, 20)" fontSize={activeTypography.tableHeader} fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
-                    <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
-                    <text x="140" y="0">MAG</text>
-                    <text x="180" y="0">R.A.</text>
-                    <text x="240" y="0">DEC.</text>
-                    <text x="290" y="0">SP.</text>
-                  </g>
-
-                  {/* Table Rows (Dynamic from dataset!) */}
-                  {brightestStars.map((star, i) => {
-                    const y = 33 + i * 11;
-                    const spectralClass = star.colorIdx < -0.1 ? 'O/B' :
-                                          star.colorIdx < 0.3 ? 'A' :
-                                          star.colorIdx < 0.5 ? 'F' :
-                                          star.colorIdx < 0.8 ? 'G' :
-                                          star.colorIdx < 1.3 ? 'K' : 'M';
-                    return (
-                      <g key={`table-row-${i}`} transform={`translate(0, ${y})`} fontSize={activeTypography.tableBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
-                        <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
-                        <text x="140" y="0">{star.mag.toFixed(2)}</text>
-                        <text x="180" y="0">{formatRA(star.ra)}</text>
-                        <text x="240" y="0">{formatDec(star.dec)}</text>
-                        <text x="290" y="0">{spectralClass}</text>
-                      </g>
-                    );
-                  })}
+                  {renderBrightStarsTable({ keyPrefix: 'landscape', titleLetterSpacing: 1.5 })}
                 </g>
               </g>
             </svg>
@@ -3257,97 +3355,25 @@ function App() {
                       </text>
                     </g>
 
-                    <g transform="translate(80, 1305)">
+                    <g transform="translate(80, 1485)">
                       <line x1="0" y1="-12" x2="1040" y2="-12" stroke={activeTheme.border} strokeWidth="1" opacity="0.5" />
 
                       <g transform="translate(0, 12)">
-                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.4">
-                          {getLocalizedText('星图图例', 'MAP LEGEND', 'en-first')}
-                        </text>
-                        <g transform="translate(0, 28)">
-                          {[1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map((mag, i) => {
-                            const r = Math.max(0.5, 4.5 - 0.6 * mag);
-                            const xOffset = i * 42;
-                            const isRetro = activeTheme.stars.retroRings;
-
-                            return (
-                              <g key={`portrait-leg-star-${suffix}-${i}`} transform={`translate(${xOffset}, 0)`}>
-                                {isRetro ? (
-                                  <g>
-                                    <circle cx="0" cy="0" r={Math.max(0.5, 2.0 - 0.25 * mag)} fill="#201e1a" />
-                                    <circle cx="0" cy="0" r={Math.max(1.2, 5.0 - 0.65 * mag)} fill="none" stroke="#d4af37" strokeWidth="0.8" />
-                                  </g>
-                                ) : (
-                                  <circle cx="0" cy="0" r={r} fill={getStarColorHSL(0.2, renderThemeId)} stroke={activeTheme.stars.stroke || 'none'} strokeWidth={activeTheme.stars.strokeWidth || 0} />
-                                )}
-                                <text x="0" y="16" textAnchor="middle" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>{mag.toFixed(0)}m</text>
-                              </g>
-                            );
-                          })}
-                        </g>
-                        <g transform="translate(0, 78)" fontSize={activeTypography.legendBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
-                          <g transform="translate(0, 0)">
-                            <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.equator.color} strokeWidth="1.2" strokeDasharray={activeTheme.equator.dash} />
-                            <text x="34" y="3.5">{getLocalizedText('天球赤道', 'Celestial Equator', 'en-first')}</text>
-                          </g>
-                          <g transform="translate(0, 18)">
-                            <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.ecliptic.color} strokeWidth="1.2" strokeDasharray={activeTheme.ecliptic.dash} />
-                            <text x="34" y="3.5">{getLocalizedText('黄道轨道', 'Ecliptic Path', 'en-first')}</text>
-                          </g>
-                          <g transform="translate(0, 36)">
-                            <line x1="0" y1="0" x2="24" y2="0" stroke={activeTheme.constellations.line} strokeWidth="1" opacity={activeTheme.constellations.lineOpacity} />
-                            <text x="34" y="3.5">{getLocalizedText('星座连线', 'Constellation Line', 'en-first')}</text>
-                          </g>
-                        </g>
+                        {renderMapLegend({ keyPrefix: `portrait-${suffix}`, starSpacing: 42, lineColumnX: 188, lineRowGap: 15, titleLetterSpacing: 1.4 })}
                       </g>
 
-                      <g transform="translate(0, 170)">
-                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.legendBody} fontWeight="bold" letterSpacing="1.2">
-                          {getLocalizedText('名词解释', 'MAP TERMS', 'en-first')}
-                        </text>
-                        <text x="0" y="18" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
-                          {isNorth
-                            ? getLocalizedText('北天: 以北天极为中心，北极星靠近图心。', 'Northern Sky: centered on the north celestial pole, near Polaris.', 'en-first')
-                            : getLocalizedText('南天: 以南天极为中心展开。', 'Southern Sky: centered on the south celestial pole.', 'en-first')}
-                        </text>
-                        <text x="0" y="34" fill={activeTheme.text.body} fontFamily={varFontPosterSans} fontSize={activeTypography.legendSmall}>
-                          {getLocalizedText('赤经小时: 赤经以小时标示，24h 环绕天球一周。', 'RA Hours: right ascension is measured in hours; 24h completes 360 degrees.', 'en-first')}
-                        </text>
-                        <a href="https://github.com/askman-dev/allsky-atlas" target="_blank" rel="noreferrer">
-                          <text x="0" y="58" fill={activeTheme.text.subtitle} fontFamily={varFontPosterSans} fontSize={activeTypography.legendBody} fontWeight="600">
-                            github.com/askman-dev/allsky-atlas
-                          </text>
-                        </a>
+                      <g transform="translate(405, 12)">
+                        {renderUsageGuide({ titleLetterSpacing: 1.4, maxTextWidth: 275 })}
                       </g>
 
-                      <g transform="translate(610, 12)">
-                        <text x="0" y="0" fill={activeTheme.text.title} fontFamily={activePosterFont} fontSize={activeTypography.sectionTitle} fontWeight="bold" letterSpacing="1.4">
-                          {getLocalizedText('亮恒星星表', 'BRIGHT CELESTIAL BODIES', 'en-first')}
-                        </text>
-                        <g transform="translate(0, 24)" fontSize={activeTypography.tableHeader} fontFamily={varFontPosterSans} fontWeight="600" fill={activeTheme.text.subtitle}>
-                          <text x="0" y="0">{getLocalizedText('恒星名称', 'STAR NAME', 'en-first')}</text>
-                          <text x="132" y="0">MAG</text>
-                          <text x="172" y="0">R.A.</text>
-                          <text x="232" y="0">DEC.</text>
-                          <text x="282" y="0">SP.</text>
-                        </g>
-
-                        {brightestStars.map((star, i) => {
-                          const y = 39 + i * 16;
-                          const spectralClass = star.colorIdx < -0.1 ? 'O/B' :
-                                                star.colorIdx < 0.3 ? 'A' :
-                                                star.colorIdx < 0.5 ? 'F' :
-                                                star.colorIdx < 0.8 ? 'G' :
-                                                star.colorIdx < 1.3 ? 'K' : 'M';
-                          return (
-                            <g key={`portrait-table-row-${suffix}-${i}`} transform={`translate(0, ${y})`} fontSize={activeTypography.tableBody} fontFamily={varFontPosterSans} fill={activeTheme.text.body}>
-                              <text x="0" y="0" fontWeight="500">{getLocalizedText(star.nameZh, star.nameEn)}</text>
-                              <text x="132" y="0">{star.mag.toFixed(2)}</text>
-                              <text x="172" y="0">{formatRA(star.ra)}</text>
-                              <text x="232" y="0">{formatDec(star.dec)}</text>
-                              <text x="282" y="0">{spectralClass}</text>
-                            </g>
-                          );
+                      <g transform="translate(725, 12)">
+                        {renderBrightStarsTable({
+                          keyPrefix: `portrait-${suffix}`,
+                          titleLetterSpacing: 1.4,
+                          headerY: 24,
+                          rowStartY: 39,
+                          rowGap: 16,
+                          columns: { mag: 120, ra: 158, dec: 214, sp: 260 },
                         })}
                       </g>
                     </g>
