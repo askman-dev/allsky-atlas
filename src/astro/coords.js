@@ -4,6 +4,17 @@ const D2R = Math.PI / 180;
 const R2D = 180 / Math.PI;
 const EPSILON = 23.4392911 * D2R; // Earth obliquity for J2000
 
+const normalizeDegrees = (deg) => {
+  const normalized = deg % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+};
+
+const pathFromProjectedPoints = (points) => (
+  points
+    .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+    .join(' ')
+);
+
 /**
  * Converts Galactic coordinates (l, b) to J2000 Equatorial coordinates (ra, dec) in degrees.
  * Uses Gaia DR1 / Hipparcos standard rotation matrix.
@@ -120,6 +131,111 @@ export function projectSouth(ra, dec, maxRadius, projectionType, overlapDec = 55
     x: r * Math.cos(theta),
     y: r * Math.sin(theta),
     r
+  };
+}
+
+/**
+ * Computes Greenwich mean sidereal time in degrees for a UTC timestamp.
+ */
+export function getGreenwichSiderealDegrees(timestampMs) {
+  const jd = timestampMs / 86400000 + 2440587.5;
+  const t = (jd - 2451545.0) / 36525;
+  return normalizeDegrees(
+    280.46061837 +
+    360.98564736629 * (jd - 2451545.0) +
+    0.000387933 * t * t -
+    (t * t * t) / 38710000
+  );
+}
+
+export function getLocalSiderealDegrees(timestampMs, longitudeDeg) {
+  return normalizeDegrees(getGreenwichSiderealDegrees(timestampMs) + longitudeDeg);
+}
+
+export function getEquatorialAltitudeDegrees(raDeg, decDeg, latitudeDeg, localSiderealDeg) {
+  const lat = latitudeDeg * D2R;
+  const dec = decDeg * D2R;
+  const hourAngle = normalizeDegrees(localSiderealDeg - raDeg) * D2R;
+  const sinAlt = Math.sin(lat) * Math.sin(dec) + Math.cos(lat) * Math.cos(dec) * Math.cos(hourAngle);
+  return Math.asin(Math.max(-1, Math.min(1, sinAlt))) * R2D;
+}
+
+export function horizontalToEquatorial(azimuthDeg, altitudeDeg, latitudeDeg, localSiderealDeg) {
+  const az = azimuthDeg * D2R;
+  const alt = altitudeDeg * D2R;
+  const lat = latitudeDeg * D2R;
+
+  const sinDec = Math.sin(lat) * Math.sin(alt) + Math.cos(lat) * Math.cos(alt) * Math.cos(az);
+  const dec = Math.asin(Math.max(-1, Math.min(1, sinDec)));
+  const hourAngle = Math.atan2(
+    -Math.sin(az) * Math.cos(alt),
+    Math.cos(lat) * Math.sin(alt) - Math.sin(lat) * Math.cos(alt) * Math.cos(az)
+  );
+
+  return {
+    ra: normalizeDegrees(localSiderealDeg - hourAngle * R2D),
+    dec: dec * R2D,
+  };
+}
+
+export function getVisibleSkyOverlay({
+  projectFn,
+  isNorth,
+  limitDec,
+  latitudeDeg,
+  longitudeDeg,
+  timestampMs,
+  cellSizeDeg = 4,
+}) {
+  const localSiderealDeg = getLocalSiderealDegrees(timestampMs, longitudeDeg);
+  const visibleCellPaths = [];
+  const decMin = isNorth ? limitDec : -90;
+  const decMax = isNorth ? 90 : limitDec;
+
+  for (let dec = decMin; dec < decMax; dec += cellSizeDeg) {
+    const nextDec = Math.min(dec + cellSizeDeg, decMax);
+    const centerDec = (dec + nextDec) / 2;
+
+    for (let ra = 0; ra < 360; ra += cellSizeDeg) {
+      const nextRa = ra + cellSizeDeg;
+      const centerRa = normalizeDegrees(ra + cellSizeDeg / 2);
+
+      if (getEquatorialAltitudeDegrees(centerRa, centerDec, latitudeDeg, localSiderealDeg) < 0) {
+        continue;
+      }
+
+      const corners = [
+        projectFn(ra, dec),
+        projectFn(nextRa, dec),
+        projectFn(nextRa, nextDec),
+        projectFn(ra, nextDec),
+      ];
+      visibleCellPaths.push(`${pathFromProjectedPoints(corners)} Z`);
+    }
+  }
+
+  const horizonPaths = [];
+  let currentSegment = [];
+  for (let i = 0; i <= 240; i++) {
+    const eq = horizontalToEquatorial((i * 360) / 240, 0, latitudeDeg, localSiderealDeg);
+    const inProjectedHemisphere = isNorth ? eq.dec >= limitDec : eq.dec <= limitDec;
+    if (inProjectedHemisphere) {
+      currentSegment.push(projectFn(eq.ra, eq.dec));
+    } else if (currentSegment.length > 1) {
+      horizonPaths.push(pathFromProjectedPoints(currentSegment));
+      currentSegment = [];
+    } else {
+      currentSegment = [];
+    }
+  }
+  if (currentSegment.length > 1) {
+    horizonPaths.push(pathFromProjectedPoints(currentSegment));
+  }
+
+  return {
+    visibleAreaPath: visibleCellPaths.join(' '),
+    horizonPaths,
+    localSiderealDeg,
   };
 }
 

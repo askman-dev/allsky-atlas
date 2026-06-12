@@ -45,6 +45,27 @@ const CONSTELLATION_FILL_PALETTE = [
   '#e78ac3',
 ];
 const CSS_PX_PER_MM = 96 / 25.4;
+const CITY_OBSERVERS = [
+  { id: 'beijing', label: 'Beijing', labelZh: '北京', latitude: 39.9, longitude: 116.4 },
+  { id: 'hongkong', label: 'Hong Kong', labelZh: '香港', latitude: 22.3, longitude: 114.2 },
+  { id: 'newyork', label: 'New York', labelZh: '纽约', latitude: 40.7, longitude: -74.0 },
+  { id: 'london', label: 'London', labelZh: '伦敦', latitude: 51.5, longitude: -0.1 },
+  { id: 'sydney', label: 'Sydney', labelZh: '悉尼', latitude: -33.9, longitude: 151.2 },
+];
+const DEFAULT_OBSERVER = CITY_OBSERVERS[0];
+const getCurrentDateParts = () => {
+  const now = new Date();
+  return {
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    day: now.getDate(),
+  };
+};
+const getDaysInMonth = (year, month) => new Date(year, month, 0).getDate();
+const getObserverTimestampMs = ({ year, month, day, hour }) => (
+  new Date(year, month - 1, Math.min(day, getDaysInMonth(year, month)), hour, 0, 0, 0).getTime()
+);
+const initialDateParts = getCurrentDateParts();
 const DEFAULT_RENDER_SETTINGS = {
   labelLanguageMode: 'en',
   fontFamily: 'serif',
@@ -67,6 +88,14 @@ const DEFAULT_RENDER_SETTINGS = {
   showEquator: false,
   showEcliptic: false,
   showMilkyWay: true,
+  showVisibleSky: true,
+  observerLatitude: DEFAULT_OBSERVER.latitude,
+  observerLongitude: DEFAULT_OBSERVER.longitude,
+  observerMonth: initialDateParts.month,
+  observerDay: initialDateParts.day,
+  observerYear: initialDateParts.year,
+  observerHour: 22,
+  observerTimestampMs: getObserverTimestampMs({ ...initialDateParts, hour: 22 }),
   showStarNames: true,
 };
 
@@ -144,6 +173,11 @@ const UI_TEXT = {
     celestialEquator: 'Celestial Equator',
     eclipticPath: 'Ecliptic Path',
     milkyWayBand: 'Milky Way Band',
+    visibleSky: 'Naked-eye Visible Sky',
+    observerLatitude: 'Observer Latitude',
+    observerHour: 'Local Hour',
+    observerMonth: 'Month',
+    observerCityHint: 'City dots set latitude and longitude',
     exportSvg: 'Export Vector SVG',
     exportPng: 'Export Print PNG',
     exportTiledPdf: 'Export A4 Tiled PDF',
@@ -216,6 +250,11 @@ const UI_TEXT = {
     celestialEquator: '天球赤道',
     eclipticPath: '黄道轨迹',
     milkyWayBand: '银河带',
+    visibleSky: '肉眼可见天空',
+    observerLatitude: '观察纬度',
+    observerHour: '本地小时',
+    observerMonth: '月份',
+    observerCityHint: '点击城市点会同时设置纬度和经度',
     exportSvg: '导出无损矢量 SVG',
     exportPng: '导出印刷级高清 PNG',
     exportTiledPdf: '导出 A4 拼接 PDF',
@@ -468,6 +507,11 @@ function App() {
   const [showEquator, setShowEquator] = useState(false);
   const [showEcliptic, setShowEcliptic] = useState(false);
   const [showMilkyWay, setShowMilkyWay] = useState(true);
+  const [showVisibleSky, setShowVisibleSky] = useState(true);
+  const [observerLatitude, setObserverLatitude] = useState(DEFAULT_OBSERVER.latitude);
+  const [observerLongitude, setObserverLongitude] = useState(DEFAULT_OBSERVER.longitude);
+  const [observerMonth, setObserverMonth] = useState(initialDateParts.month);
+  const [observerHour, setObserverHour] = useState(22);
   const [showStarNames, setShowStarNames] = useState(true);
   const [renderSettings, setRenderSettings] = useState(() => ({
     ...DEFAULT_RENDER_SETTINGS,
@@ -494,6 +538,7 @@ function App() {
   const renderShowEquator = renderSettings.showEquator;
   const renderShowEcliptic = renderSettings.showEcliptic;
   const renderShowMilkyWay = renderSettings.showMilkyWay;
+  const renderShowVisibleSky = renderSettings.showVisibleSky;
   const renderShowStarNames = renderSettings.showStarNames;
 
   const hidePosterRenderNoticeSoon = () => {
@@ -800,6 +845,57 @@ function App() {
     if (value <= MAG_RANGE_MIN) return '0-';
     if (value >= MAG_RANGE_PLUS) return '6+';
     return `${Math.round(value)}`;
+  };
+  const getObserverRenderPatch = ({ latitude = observerLatitude, longitude = observerLongitude, month = observerMonth, hour = observerHour }) => {
+    const dateParts = getCurrentDateParts();
+    const clampedDay = Math.min(dateParts.day, getDaysInMonth(dateParts.year, month));
+    return {
+      observerLatitude: latitude,
+      observerLongitude: longitude,
+      observerMonth: month,
+      observerDay: clampedDay,
+      observerYear: dateParts.year,
+      observerHour: hour,
+      observerTimestampMs: getObserverTimestampMs({
+        year: dateParts.year,
+        month,
+        day: clampedDay,
+        hour,
+      }),
+    };
+  };
+  const getCityName = (city) => displayLanguage === 'zh' ? city.labelZh : city.label;
+  const latitudePercent = (lat) => ((lat + 60) / 120) * 100;
+
+  const updateObserverLatitude = (nextLatitude) => {
+    schedulePosterUpdate(
+      () => setObserverLatitude(nextLatitude),
+      getObserverRenderPatch({ latitude: nextLatitude })
+    );
+  };
+
+  const updateObserverCity = (city) => {
+    schedulePosterUpdate(
+      () => {
+        setObserverLatitude(city.latitude);
+        setObserverLongitude(city.longitude);
+      },
+      getObserverRenderPatch({ latitude: city.latitude, longitude: city.longitude })
+    );
+  };
+
+  const updateObserverMonth = (nextMonth) => {
+    schedulePosterUpdate(
+      () => setObserverMonth(nextMonth),
+      getObserverRenderPatch({ month: nextMonth })
+    );
+  };
+
+  const updateObserverHour = (nextHour) => {
+    schedulePosterUpdate(
+      () => setObserverHour(nextHour),
+      getObserverRenderPatch({ hour: nextHour })
+    );
   };
   const isMagnitudeVisible = (star) => {
     const passesMin = renderMinMagLimit <= MAG_RANGE_MIN
@@ -1368,6 +1464,32 @@ function App() {
 
         <g clipPath={`url(#${clipId})`}>
           <circle cx="0" cy="0" r={sphereRadius} fill={sphereBackgroundColor} />
+
+          {renderShowVisibleSky && sphereData.visibleSkyOverlay?.visibleAreaPath && (
+            <path
+              d={sphereData.visibleSkyOverlay.visibleAreaPath}
+              fill={activeTheme.ecliptic.color}
+              opacity="0.14"
+              fillRule="nonzero"
+            />
+          )}
+
+          {renderShowVisibleSky && sphereData.visibleSkyOverlay?.horizonPaths?.length > 0 && (
+            <g>
+              {sphereData.visibleSkyOverlay.horizonPaths.map((path, index) => (
+                <path
+                  key={`visible-horizon-${index}`}
+                  d={path}
+                  fill="none"
+                  stroke={activeTheme.ecliptic.color}
+                  strokeWidth="1.7"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity="0.9"
+                />
+              ))}
+            </g>
+          )}
 
           {renderShowMilkyWay && (
             <g opacity="0.8">
@@ -2577,6 +2699,81 @@ function App() {
                     { southRotation: nextSouthRotation }
                   );
                 }}
+              />
+            </div>
+            <ToggleRow checked={showVisibleSky} onChange={(checked) => schedulePosterUpdate(
+              () => setShowVisibleSky(checked),
+              { showVisibleSky: checked }
+            )}>
+              {uiText.visibleSky}
+            </ToggleRow>
+            <div className="form-field">
+              <label>
+                {uiText.observerLatitude} <span className="value">{observerLatitude.toFixed(1)}°</span>
+              </label>
+              <div className="marked-range">
+                <input
+                  type="range"
+                  className="slider-input"
+                  min="-60"
+                  max="60"
+                  step="0.1"
+                  value={observerLatitude}
+                  onChange={(e) => updateObserverLatitude(Number(e.target.value))}
+                />
+                <div className="range-markers" aria-hidden="true">
+                  {CITY_OBSERVERS.map((city) => (
+                    <button
+                      key={city.id}
+                      type="button"
+                      className="range-marker"
+                      style={{ left: `${latitudePercent(city.latitude)}%` }}
+                      title={`${getCityName(city)} ${city.latitude.toFixed(1)}°`}
+                      onClick={() => updateObserverCity(city)}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="range-scale city-scale">
+                {CITY_OBSERVERS.map((city) => (
+                  <button
+                    key={city.id}
+                    type="button"
+                    style={{ left: `${latitudePercent(city.latitude)}%` }}
+                    onClick={() => updateObserverCity(city)}
+                  >
+                    {getCityName(city)}
+                  </button>
+                ))}
+              </div>
+              <p className="field-hint">{uiText.observerCityHint}</p>
+            </div>
+            <div className="form-field">
+              <label>
+                {uiText.observerHour} <span className="value">{observerHour}:00</span>
+              </label>
+              <input
+                type="range"
+                className="slider-input"
+                min="0"
+                max="23"
+                step="1"
+                value={observerHour}
+                onChange={(e) => updateObserverHour(Number(e.target.value))}
+              />
+            </div>
+            <div className="form-field">
+              <label>
+                {uiText.observerMonth} <span className="value">{observerMonth}</span>
+              </label>
+              <input
+                type="range"
+                className="slider-input"
+                min="1"
+                max="12"
+                step="1"
+                value={observerMonth}
+                onChange={(e) => updateObserverMonth(Number(e.target.value))}
               />
             </div>
           </div>

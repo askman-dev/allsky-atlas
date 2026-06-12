@@ -4,6 +4,7 @@ import {
   getGridLines,
   getEclipticPoints,
   getGalacticContourPoints,
+  getVisibleSkyOverlay,
 } from '../astro/coords';
 import {
   getProjectedBoundaryFillPaths,
@@ -102,6 +103,17 @@ function computeSphere({
     getGalacticContourPoints(9, projectFn),
     getGalacticContourPoints(-9, projectFn)
   );
+
+  const visibleSkyOverlay = settings.showVisibleSky
+    ? getVisibleSkyOverlay({
+      projectFn,
+      isNorth,
+      limitDec,
+      latitudeDeg: settings.observerLatitude,
+      longitudeDeg: settings.observerLongitude,
+      timestampMs: settings.observerTimestampMs,
+    })
+    : null;
 
   const boundaryPath = boundarySegments
     .filter(([a, b]) => {
@@ -292,6 +304,7 @@ function computeSphere({
     equatorPath,
     mwOuterPath,
     mwInnerPath,
+    visibleSkyOverlay,
     boundaryPath,
     boundaryFillRegions,
     labels: resolvedLabels,
