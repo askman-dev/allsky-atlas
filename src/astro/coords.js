@@ -185,14 +185,62 @@ export function getVisibleSkyOverlay({
   latitudeDeg,
   longitudeDeg,
   timestampMs,
-  timeWindowHours = 6,
+  timeWindowHours = 0,
   sampleStepMinutes = 30,
   cellSizeDeg = 4,
 }) {
+  const localSiderealDeg = getLocalSiderealDegrees(timestampMs, longitudeDeg);
   const visibleCellPaths = [];
   const outlinePaths = [];
   const decMin = isNorth ? limitDec : -90;
   const decMax = isNorth ? 90 : limitDec;
+
+  if (timeWindowHours <= 0) {
+    for (let dec = decMin; dec < decMax; dec += cellSizeDeg) {
+      const nextDec = Math.min(dec + cellSizeDeg, decMax);
+      const centerDec = (dec + nextDec) / 2;
+
+      for (let ra = 0; ra < 360; ra += cellSizeDeg) {
+        const nextRa = ra + cellSizeDeg;
+        const centerRa = normalizeDegrees(ra + cellSizeDeg / 2);
+
+        if (getEquatorialAltitudeDegrees(centerRa, centerDec, latitudeDeg, localSiderealDeg) < 0) {
+          continue;
+        }
+
+        const corners = [
+          projectFn(ra, dec),
+          projectFn(nextRa, dec),
+          projectFn(nextRa, nextDec),
+          projectFn(ra, nextDec),
+        ];
+        visibleCellPaths.push(`${pathFromProjectedPoints(corners)} Z`);
+      }
+    }
+
+    let currentSegment = [];
+    for (let i = 0; i <= 240; i++) {
+      const eq = horizontalToEquatorial((i * 360) / 240, 0, latitudeDeg, localSiderealDeg);
+      const inProjectedHemisphere = isNorth ? eq.dec >= limitDec : eq.dec <= limitDec;
+      if (inProjectedHemisphere) {
+        currentSegment.push(projectFn(eq.ra, eq.dec));
+      } else if (currentSegment.length > 1) {
+        outlinePaths.push(pathFromProjectedPoints(currentSegment));
+        currentSegment = [];
+      } else {
+        currentSegment = [];
+      }
+    }
+    if (currentSegment.length > 1) {
+      outlinePaths.push(pathFromProjectedPoints(currentSegment));
+    }
+
+    return {
+      visibleAreaPath: visibleCellPaths.join(' '),
+      horizonPaths: outlinePaths,
+    };
+  }
+
   const halfWindowMs = (timeWindowHours * 60 * 60 * 1000) / 2;
   const sampleStepMs = sampleStepMinutes * 60 * 1000;
   const sampleSiderealDegrees = [];

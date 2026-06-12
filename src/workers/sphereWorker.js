@@ -112,6 +112,7 @@ function computeSphere({
       latitudeDeg: settings.observerLatitude,
       longitudeDeg: settings.observerLongitude,
       timestampMs: settings.observerTimestampMs,
+      timeWindowHours: settings.showVisibleSkyTimeWindow ? 6 : 0,
     })
     : null;
 

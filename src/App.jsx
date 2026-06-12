@@ -89,6 +89,7 @@ const DEFAULT_RENDER_SETTINGS = {
   showEcliptic: false,
   showMilkyWay: true,
   showVisibleSky: true,
+  showVisibleSkyTimeWindow: false,
   observerLatitude: DEFAULT_OBSERVER.latitude,
   observerLongitude: DEFAULT_OBSERVER.longitude,
   observerMonth: initialDateParts.month,
@@ -174,11 +175,12 @@ const UI_TEXT = {
     eclipticPath: 'Ecliptic Path',
     milkyWayBand: 'Milky Way Band',
     visibleSky: 'Naked-eye Visible Sky',
+    visibleSkyTimeWindow: 'Extend ±3 Hours',
     observerLatitude: 'Observer Latitude',
     observerHour: 'Local Hour',
     observerMonth: 'Month',
     observerCityHint: 'City dots set latitude and longitude',
-    observerHourHint: 'Visible sky shows the 6-hour window from 3 hours before to 3 hours after the selected hour.',
+    observerHourHint: 'Default uses the selected hour only. Turn on ±3 hours to show a 6-hour visible-sky window.',
     exportSvg: 'Export Vector SVG',
     exportPng: 'Export Print PNG',
     exportTiledPdf: 'Export A4 Tiled PDF',
@@ -252,11 +254,12 @@ const UI_TEXT = {
     eclipticPath: '黄道轨迹',
     milkyWayBand: '银河带',
     visibleSky: '肉眼可见天空',
+    visibleSkyTimeWindow: '前后延长 3 小时',
     observerLatitude: '观察纬度',
     observerHour: '本地小时',
     observerMonth: '月份',
     observerCityHint: '点击城市点会同时设置纬度和经度',
-    observerHourHint: '肉眼可见天空会绘制所选小时前 3 小时到后 3 小时的 6 小时范围。',
+    observerHourHint: '默认只绘制所选小时；开启“前后延长 3 小时”后绘制 6 小时范围。',
     exportSvg: '导出无损矢量 SVG',
     exportPng: '导出印刷级高清 PNG',
     exportTiledPdf: '导出 A4 拼接 PDF',
@@ -510,6 +513,7 @@ function App() {
   const [showEcliptic, setShowEcliptic] = useState(false);
   const [showMilkyWay, setShowMilkyWay] = useState(true);
   const [showVisibleSky, setShowVisibleSky] = useState(true);
+  const [showVisibleSkyTimeWindow, setShowVisibleSkyTimeWindow] = useState(false);
   const [observerLatitude, setObserverLatitude] = useState(DEFAULT_OBSERVER.latitude);
   const [observerLongitude, setObserverLongitude] = useState(DEFAULT_OBSERVER.longitude);
   const [observerMonth, setObserverMonth] = useState(initialDateParts.month);
@@ -541,6 +545,7 @@ function App() {
   const renderShowEcliptic = renderSettings.showEcliptic;
   const renderShowMilkyWay = renderSettings.showMilkyWay;
   const renderShowVisibleSky = renderSettings.showVisibleSky;
+  const renderShowVisibleSkyTimeWindow = renderSettings.showVisibleSkyTimeWindow;
   const renderShowStarNames = renderSettings.showStarNames;
 
   const hidePosterRenderNoticeSoon = () => {
@@ -789,10 +794,12 @@ function App() {
   const getVisibleSkyParameterText = () => {
     const lat = formatSignedDegree(renderSettings.observerLatitude, 'N', 'S');
     const lon = formatSignedDegree(renderSettings.observerLongitude, 'E', 'W');
-    const timeRangeText = getVisibleSkyTimeRangeText();
+    const timeText = renderShowVisibleSkyTimeWindow
+      ? getVisibleSkyTimeRangeText()
+      : getVisibleSkyHourText();
     return getLocalizedText(
-      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 本地时间 ${timeRangeText} 在地平线以上的星空区域。`,
-      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Local time ${timeRangeText}.`,
+      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 本地时间 ${timeText} 在地平线以上的星空区域。`,
+      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Local time ${timeText}.`,
       'en-first'
     );
   };
@@ -815,6 +822,10 @@ function App() {
 
   const formatDateHour = (date) => (
     `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:00`
+  );
+
+  const getVisibleSkyHourText = () => (
+    formatDateHour(new Date(renderSettings.observerTimestampMs))
   );
 
   const getVisibleSkyTimeRangeText = () => {
@@ -2978,6 +2989,17 @@ function App() {
               />
               <p className="field-hint">{uiText.observerHourHint}</p>
             </div>
+            <ToggleRow
+              checked={showVisibleSkyTimeWindow}
+              onChange={(checked) => schedulePosterUpdate(
+                () => setShowVisibleSkyTimeWindow(checked),
+                { showVisibleSkyTimeWindow: checked }
+              )}
+              indented
+              muted={!showVisibleSky}
+            >
+              {uiText.visibleSkyTimeWindow}
+            </ToggleRow>
             <div className="form-field">
               <label>
                 {uiText.observerMonth} <span className="value">{observerMonth}</span>
