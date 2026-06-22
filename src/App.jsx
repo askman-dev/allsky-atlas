@@ -137,7 +137,7 @@ const matrixToCssMatrix3d = (matrix) => (
 );
 
 const DEFAULT_3D_VIEW = {
-  viewMatrix: multiplyMatrix4(rotationXMatrix(12), rotationYMatrix(-10)),
+  viewMatrix: rotationXMatrix(44),
   modelMatrix: rotationZMatrix(0),
   scale: 1,
 };
