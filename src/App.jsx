@@ -44,6 +44,103 @@ const CONSTELLATION_FILL_PALETTE = [
   '#66c2a5',
   '#e78ac3',
 ];
+const APP_PAGES = new Set(['poster', 'constellation-3d']);
+const DEFAULT_3D_MODEL_SETTINGS = {
+  constellationAbbr: 'ORI',
+  cardWidthMm: 120,
+  baseThicknessMm: 2.4,
+  reliefHeightMm: 1.4,
+  grooveDiameterMm: 4.8,
+  grooveDepthMm: 1.2,
+  outlinePaddingMm: 11,
+};
+const clampModelScale = (scale) => Math.min(2.8, Math.max(0.45, scale));
+const degToRad = (degrees) => degrees * Math.PI / 180;
+const MIN_CARD_VIEW_ANGLE_DEG = 30;
+const MIN_CARD_NORMAL_Z = Math.sin(degToRad(MIN_CARD_VIEW_ANGLE_DEG));
+const multiplyMatrix4 = (a, b) => {
+  const output = new Array(16).fill(0);
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < 4; col++) {
+      for (let k = 0; k < 4; k++) {
+        output[row * 4 + col] += a[row * 4 + k] * b[k * 4 + col];
+      }
+    }
+  }
+  return output;
+};
+
+const rotationXMatrix = (degrees) => {
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return [
+    1, 0, 0, 0,
+    0, cos, -sin, 0,
+    0, sin, cos, 0,
+    0, 0, 0, 1,
+  ];
+};
+
+const rotationYMatrix = (degrees) => {
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return [
+    cos, 0, sin, 0,
+    0, 1, 0, 0,
+    -sin, 0, cos, 0,
+    0, 0, 0, 1,
+  ];
+};
+
+const rotationZMatrix = (degrees) => {
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return [
+    cos, -sin, 0, 0,
+    sin, cos, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+};
+
+const getCardNormalViewZ = (matrix) => matrix[10];
+
+const applyLimitedViewPitch = (matrix, pitchDegrees) => {
+  const applyPitch = (degrees) => multiplyMatrix4(rotationXMatrix(degrees), matrix);
+  const candidate = applyPitch(pitchDegrees);
+  if (getCardNormalViewZ(candidate) >= MIN_CARD_NORMAL_Z) return candidate;
+
+  let low = 0;
+  let high = pitchDegrees;
+  for (let i = 0; i < 18; i++) {
+    const mid = (low + high) / 2;
+    const midMatrix = applyPitch(mid);
+    if (getCardNormalViewZ(midMatrix) >= MIN_CARD_NORMAL_Z) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  return applyPitch(low);
+};
+
+const matrixToCssMatrix3d = (matrix) => (
+  `matrix3d(${[
+    matrix[0], matrix[4], matrix[8], matrix[12],
+    matrix[1], matrix[5], matrix[9], matrix[13],
+    matrix[2], matrix[6], matrix[10], matrix[14],
+    matrix[3], matrix[7], matrix[11], matrix[15],
+  ].map((value) => Number(value.toFixed(6))).join(', ')})`
+);
+
+const DEFAULT_3D_VIEW = {
+  viewMatrix: multiplyMatrix4(rotationXMatrix(12), rotationYMatrix(-10)),
+  modelMatrix: rotationZMatrix(0),
+  scale: 1,
+};
 const CSS_PX_PER_MM = 96 / 25.4;
 const CITY_OBSERVERS = [
   { id: 'beijing', label: 'Beijing', labelZh: '北京', latitude: 39.9, longitude: 116.4 },
@@ -106,7 +203,550 @@ const getInitialLanguageMode = () => {
   return LANGUAGE_MODES.has(mode) ? mode : 'en';
 };
 
+const getInitialPage = () => {
+  if (typeof window === 'undefined') return 'poster';
+  const page = new URLSearchParams(window.location.search).get('page');
+  return APP_PAGES.has(page) ? page : 'poster';
+};
+
 const getDisplayLanguage = (mode) => mode === 'zh' ? 'zh' : 'en';
+
+const getConstellationStarHipsFromEdges = (edges = []) => (
+  [...new Set(edges.flat())]
+);
+
+const SILHOUETTE_GROUP_BY_ABBR = {
+  ORI: 'hunter',
+  HER: 'warrior',
+  PER: 'warrior',
+  CEP: 'robed_person',
+  CAS: 'robed_person',
+  AND: 'robed_person',
+  VIR: 'robed_person',
+  IND: 'robed_person',
+  AQR: 'water_bearer',
+  GEM: 'twins',
+  OPH: 'serpent_bearer',
+  BOO: 'herdsman',
+  AUR: 'charioteer',
+  SGR: 'centaur_archer',
+  CEN: 'centaur',
+  PEG: 'winged_horse',
+  EQU: 'horse',
+  LEO: 'lion',
+  LMI: 'lion',
+  UMA: 'bear',
+  UMI: 'bear',
+  CMa: 'dog',
+  CMA: 'dog',
+  CMI: 'dog',
+  CVN: 'dog',
+  LUP: 'wolf',
+  TAU: 'bull',
+  ARI: 'ram',
+  CAP: 'goat_fish',
+  SCO: 'scorpion',
+  CNC: 'crab',
+  PSC: 'fish',
+  PSA: 'fish',
+  CET: 'sea_monster',
+  HYA: 'serpent',
+  HYI: 'serpent',
+  SER: 'serpent',
+  DRA: 'dragon',
+  ERI: 'serpent',
+  LAC: 'dragon',
+  CYG: 'swan',
+  AQL: 'eagle',
+  ARA: 'altar',
+  COL: 'dove',
+  CRV: 'bird',
+  CRU: 'cross',
+  GRU: 'crane',
+  PAV: 'peacock',
+  PHE: 'phoenix',
+  APS: 'bird',
+  TUC: 'bird',
+  MUS: 'bird',
+  VOL: 'fish',
+  DOR: 'fish',
+  DEL: 'dolphin',
+  PUP: 'ship',
+  CAR: 'ship',
+  VEL: 'ship',
+  PYX: 'instrument',
+  SCL: 'instrument',
+  CAE: 'instrument',
+  CIR: 'instrument',
+  FOR: 'instrument',
+  HOR: 'instrument',
+  ANT: 'instrument',
+  MIC: 'instrument',
+  OCT: 'instrument',
+  PIC: 'instrument',
+  RET: 'instrument',
+  SEX: 'instrument',
+  TEL: 'instrument',
+  NOR: 'instrument',
+  MEN: 'instrument',
+  LYR: 'lyre',
+  CRA: 'crown',
+  CRB: 'crown',
+  COM: 'crown',
+  TRI: 'triangle',
+  TRA: 'triangle',
+  SGE: 'arrow',
+  SCT: 'shield',
+  CRT: 'cup',
+  LIB: 'scales',
+  CAM: 'horse',
+  MON: 'horse',
+  LEP: 'ram',
+  LYN: 'lion',
+  VUL: 'wolf',
+};
+
+const SILHOUETTE_DETAIL_LINES = {
+  hunter: [
+    [{ x: 0.02, y: -0.31 }, { x: 0.08, y: -0.38 }, { x: 0.17, y: -0.37 }, { x: 0.24, y: -0.30 }, { x: 0.22, y: -0.23 }],
+    [{ x: -0.01, y: -0.20 }, { x: 0.10, y: -0.13 }, { x: 0.15, y: 0.02 }, { x: 0.10, y: 0.16 }],
+    [{ x: -0.15, y: 0.04 }, { x: 0.10, y: -0.01 }, { x: 0.22, y: -0.09 }],
+    [{ x: -0.13, y: 0.09 }, { x: 0.09, y: 0.05 }, { x: 0.23, y: 0.00 }],
+    [{ x: -0.05, y: 0.10 }, { x: -0.05, y: 0.32 }, { x: -0.02, y: 0.42 }],
+    [{ x: -0.05, y: 0.32 }, { x: 0.10, y: 0.28 }, { x: 0.15, y: 0.43 }],
+    [{ x: 0.30, y: -0.29 }, { x: 0.47, y: -0.35 }, { x: 0.62, y: -0.24 }, { x: 0.67, y: -0.06 }],
+    [{ x: 0.46, y: -0.12 }, { x: 0.57, y: 0.10 }, { x: 0.51, y: 0.31 }, { x: 0.35, y: 0.43 }],
+    [{ x: 0.32, y: -0.02 }, { x: 0.43, y: 0.22 }, { x: 0.28, y: 0.40 }],
+  ],
+};
+
+const SILHOUETTE_TEMPLATES = {
+  hunter: [
+    { x: -0.43, y: -0.61 }, { x: -0.34, y: -0.66 }, { x: -0.24, y: -0.63 }, { x: -0.17, y: -0.56 },
+    { x: -0.18, y: -0.47 }, { x: -0.29, y: -0.34 }, { x: -0.40, y: -0.22 }, { x: -0.49, y: -0.12 },
+    { x: -0.55, y: -0.13 }, { x: -0.53, y: -0.22 }, { x: -0.42, y: -0.43 }, { x: -0.32, y: -0.54 },
+    { x: -0.26, y: -0.38 }, { x: -0.22, y: -0.22 }, { x: -0.16, y: -0.10 }, { x: -0.06, y: -0.04 },
+    { x: 0.04, y: -0.09 }, { x: 0.00, y: -0.24 }, { x: 0.04, y: -0.32 }, { x: 0.12, y: -0.36 },
+    { x: 0.20, y: -0.34 }, { x: 0.25, y: -0.28 }, { x: 0.36, y: -0.40 }, { x: 0.52, y: -0.38 },
+    { x: 0.64, y: -0.29 }, { x: 0.70, y: -0.15 }, { x: 0.67, y: 0.03 }, { x: 0.58, y: 0.20 },
+    { x: 0.46, y: 0.34 }, { x: 0.32, y: 0.43 }, { x: 0.22, y: 0.48 }, { x: 0.24, y: 0.61 },
+    { x: 0.15, y: 0.65 }, { x: 0.04, y: 0.63 }, { x: 0.00, y: 0.50 }, { x: -0.04, y: 0.29 },
+    { x: -0.10, y: 0.52 }, { x: -0.22, y: 0.70 }, { x: -0.34, y: 0.77 }, { x: -0.43, y: 0.74 },
+    { x: -0.39, y: 0.62 }, { x: -0.28, y: 0.52 }, { x: -0.23, y: 0.36 }, { x: -0.16, y: 0.16 },
+    { x: -0.21, y: 0.02 }, { x: -0.26, y: -0.13 }, { x: -0.36, y: -0.28 }, { x: -0.31, y: -0.42 },
+  ],
+  warrior: [
+    { x: -0.03, y: -0.54 }, { x: 0.10, y: -0.51 }, { x: 0.16, y: -0.41 }, { x: 0.12, y: -0.30 },
+    { x: 0.34, y: -0.36 }, { x: 0.50, y: -0.23 }, { x: 0.41, y: -0.07 }, { x: 0.18, y: -0.15 },
+    { x: 0.19, y: 0.08 }, { x: 0.38, y: 0.24 }, { x: 0.30, y: 0.41 }, { x: 0.08, y: 0.30 },
+    { x: 0.02, y: 0.52 }, { x: -0.14, y: 0.52 }, { x: -0.17, y: 0.25 }, { x: -0.38, y: 0.40 },
+    { x: -0.50, y: 0.26 }, { x: -0.24, y: 0.02 }, { x: -0.30, y: -0.19 }, { x: -0.50, y: -0.30 },
+    { x: -0.38, y: -0.44 }, { x: -0.15, y: -0.32 },
+  ],
+  robed_person: [
+    { x: -0.06, y: -0.55 }, { x: 0.08, y: -0.55 }, { x: 0.16, y: -0.45 }, { x: 0.14, y: -0.34 },
+    { x: 0.36, y: -0.25 }, { x: 0.46, y: -0.08 }, { x: 0.30, y: 0.02 }, { x: 0.22, y: -0.06 },
+    { x: 0.34, y: 0.47 }, { x: 0.06, y: 0.56 }, { x: -0.28, y: 0.48 }, { x: -0.16, y: -0.05 },
+    { x: -0.36, y: 0.05 }, { x: -0.48, y: -0.10 }, { x: -0.34, y: -0.27 }, { x: -0.12, y: -0.35 },
+  ],
+  water_bearer: [
+    { x: -0.07, y: -0.54 }, { x: 0.07, y: -0.54 }, { x: 0.15, y: -0.43 }, { x: 0.12, y: -0.32 },
+    { x: 0.38, y: -0.30 }, { x: 0.55, y: -0.15 }, { x: 0.44, y: 0.00 }, { x: 0.20, y: -0.11 },
+    { x: 0.16, y: 0.15 }, { x: 0.24, y: 0.50 }, { x: 0.05, y: 0.54 }, { x: -0.03, y: 0.22 },
+    { x: -0.16, y: 0.53 }, { x: -0.34, y: 0.48 }, { x: -0.22, y: 0.08 }, { x: -0.45, y: -0.01 },
+    { x: -0.54, y: -0.20 }, { x: -0.34, y: -0.30 }, { x: -0.14, y: -0.33 },
+  ],
+  twins: [
+    { x: -0.28, y: -0.54 }, { x: -0.16, y: -0.54 }, { x: -0.10, y: -0.43 }, { x: -0.16, y: -0.30 },
+    { x: -0.03, y: -0.22 }, { x: 0.08, y: -0.32 }, { x: 0.15, y: -0.48 }, { x: 0.28, y: -0.50 },
+    { x: 0.36, y: -0.38 }, { x: 0.31, y: -0.26 }, { x: 0.48, y: -0.12 }, { x: 0.38, y: 0.05 },
+    { x: 0.24, y: -0.06 }, { x: 0.28, y: 0.48 }, { x: 0.09, y: 0.52 }, { x: 0.02, y: 0.10 },
+    { x: -0.08, y: 0.52 }, { x: -0.28, y: 0.50 }, { x: -0.22, y: -0.05 }, { x: -0.40, y: 0.04 },
+    { x: -0.50, y: -0.14 }, { x: -0.32, y: -0.28 },
+  ],
+  centaur_archer: [
+    { x: -0.55, y: -0.08 }, { x: -0.30, y: -0.24 }, { x: -0.12, y: -0.42 }, { x: 0.03, y: -0.52 },
+    { x: 0.15, y: -0.45 }, { x: 0.07, y: -0.28 }, { x: 0.26, y: -0.20 }, { x: 0.56, y: -0.42 },
+    { x: 0.45, y: -0.08 }, { x: 0.24, y: -0.01 }, { x: 0.14, y: 0.18 }, { x: 0.36, y: 0.42 },
+    { x: 0.10, y: 0.34 }, { x: -0.12, y: 0.14 }, { x: -0.20, y: 0.46 }, { x: -0.42, y: 0.45 },
+    { x: -0.36, y: 0.12 }, { x: -0.55, y: 0.08 },
+  ],
+  centaur: [
+    { x: -0.55, y: -0.06 }, { x: -0.28, y: -0.24 }, { x: -0.08, y: -0.45 }, { x: 0.08, y: -0.50 },
+    { x: 0.16, y: -0.36 }, { x: 0.09, y: -0.20 }, { x: 0.36, y: -0.12 }, { x: 0.54, y: 0.02 },
+    { x: 0.40, y: 0.18 }, { x: 0.16, y: 0.15 }, { x: 0.18, y: 0.48 }, { x: -0.04, y: 0.48 },
+    { x: -0.12, y: 0.18 }, { x: -0.31, y: 0.45 }, { x: -0.50, y: 0.37 }, { x: -0.40, y: 0.10 },
+  ],
+  winged_horse: [
+    { x: -0.56, y: -0.02 }, { x: -0.34, y: -0.22 }, { x: -0.10, y: -0.24 }, { x: 0.04, y: -0.50 },
+    { x: 0.20, y: -0.18 }, { x: 0.46, y: -0.26 }, { x: 0.56, y: -0.10 }, { x: 0.40, y: 0.02 },
+    { x: 0.30, y: 0.26 }, { x: 0.10, y: 0.22 }, { x: 0.06, y: 0.52 }, { x: -0.14, y: 0.50 },
+    { x: -0.20, y: 0.20 }, { x: -0.42, y: 0.36 }, { x: -0.54, y: 0.18 },
+  ],
+  horse: [
+    { x: -0.54, y: 0.06 }, { x: -0.34, y: -0.16 }, { x: -0.05, y: -0.20 }, { x: 0.24, y: -0.12 },
+    { x: 0.52, y: -0.24 }, { x: 0.56, y: -0.06 }, { x: 0.36, y: 0.04 }, { x: 0.26, y: 0.30 },
+    { x: 0.08, y: 0.30 }, { x: -0.02, y: 0.06 }, { x: -0.25, y: 0.34 }, { x: -0.46, y: 0.26 },
+  ],
+  lion: [
+    { x: -0.54, y: 0.02 }, { x: -0.34, y: -0.18 }, { x: -0.10, y: -0.22 }, { x: 0.02, y: -0.42 },
+    { x: 0.22, y: -0.32 }, { x: 0.18, y: -0.16 }, { x: 0.48, y: -0.12 }, { x: 0.56, y: 0.05 },
+    { x: 0.38, y: 0.16 }, { x: 0.16, y: 0.12 }, { x: 0.18, y: 0.45 }, { x: -0.02, y: 0.45 },
+    { x: -0.10, y: 0.15 }, { x: -0.34, y: 0.36 }, { x: -0.50, y: 0.26 },
+  ],
+  bear: [
+    { x: -0.54, y: -0.06 }, { x: -0.36, y: -0.25 }, { x: -0.10, y: -0.24 }, { x: 0.18, y: -0.16 },
+    { x: 0.38, y: -0.26 }, { x: 0.55, y: -0.10 }, { x: 0.42, y: 0.04 }, { x: 0.26, y: 0.02 },
+    { x: 0.24, y: 0.36 }, { x: 0.02, y: 0.40 }, { x: -0.05, y: 0.11 }, { x: -0.30, y: 0.37 },
+    { x: -0.50, y: 0.28 }, { x: -0.38, y: 0.03 },
+  ],
+  dog: [
+    { x: -0.54, y: 0.00 }, { x: -0.34, y: -0.20 }, { x: -0.08, y: -0.18 }, { x: 0.18, y: -0.10 },
+    { x: 0.42, y: -0.24 }, { x: 0.56, y: -0.08 }, { x: 0.42, y: 0.04 }, { x: 0.28, y: 0.00 },
+    { x: 0.24, y: 0.40 }, { x: 0.04, y: 0.42 }, { x: -0.04, y: 0.12 }, { x: -0.28, y: 0.38 },
+    { x: -0.46, y: 0.30 }, { x: -0.34, y: 0.05 },
+  ],
+  wolf: [
+    { x: -0.55, y: 0.04 }, { x: -0.34, y: -0.20 }, { x: -0.08, y: -0.22 }, { x: 0.22, y: -0.12 },
+    { x: 0.48, y: -0.28 }, { x: 0.58, y: -0.08 }, { x: 0.42, y: 0.02 }, { x: 0.24, y: 0.02 },
+    { x: 0.22, y: 0.44 }, { x: 0.02, y: 0.44 }, { x: -0.06, y: 0.12 }, { x: -0.35, y: 0.36 },
+    { x: -0.52, y: 0.26 },
+  ],
+  bull: [
+    { x: -0.55, y: -0.02 }, { x: -0.38, y: -0.28 }, { x: -0.12, y: -0.20 }, { x: 0.14, y: -0.18 },
+    { x: 0.36, y: -0.36 }, { x: 0.52, y: -0.26 }, { x: 0.38, y: -0.08 }, { x: 0.56, y: 0.05 },
+    { x: 0.38, y: 0.20 }, { x: 0.10, y: 0.10 }, { x: 0.04, y: 0.48 }, { x: -0.16, y: 0.48 },
+    { x: -0.22, y: 0.12 }, { x: -0.46, y: 0.26 },
+  ],
+  ram: [
+    { x: -0.52, y: -0.02 }, { x: -0.34, y: -0.25 }, { x: -0.10, y: -0.18 }, { x: 0.15, y: -0.18 },
+    { x: 0.36, y: -0.34 }, { x: 0.53, y: -0.18 }, { x: 0.42, y: 0.02 }, { x: 0.24, y: 0.04 },
+    { x: 0.20, y: 0.42 }, { x: 0.02, y: 0.44 }, { x: -0.08, y: 0.10 }, { x: -0.34, y: 0.30 },
+    { x: -0.50, y: 0.20 },
+  ],
+  goat_fish: [
+    { x: -0.54, y: -0.12 }, { x: -0.30, y: -0.32 }, { x: -0.08, y: -0.22 }, { x: 0.12, y: -0.34 },
+    { x: 0.32, y: -0.20 }, { x: 0.18, y: 0.02 }, { x: 0.52, y: 0.16 }, { x: 0.28, y: 0.28 },
+    { x: 0.52, y: 0.43 }, { x: 0.05, y: 0.36 }, { x: -0.18, y: 0.16 }, { x: -0.42, y: 0.14 },
+  ],
+  scorpion: [
+    { x: -0.56, y: -0.18 }, { x: -0.34, y: -0.30 }, { x: -0.14, y: -0.20 }, { x: 0.04, y: -0.26 },
+    { x: 0.24, y: -0.14 }, { x: 0.48, y: -0.28 }, { x: 0.56, y: -0.08 }, { x: 0.38, y: 0.02 },
+    { x: 0.20, y: 0.00 }, { x: 0.10, y: 0.16 }, { x: 0.22, y: 0.32 }, { x: 0.10, y: 0.50 },
+    { x: -0.04, y: 0.32 }, { x: -0.20, y: 0.22 }, { x: -0.42, y: 0.28 }, { x: -0.54, y: 0.08 },
+  ],
+  crab: [
+    { x: -0.50, y: -0.18 }, { x: -0.30, y: -0.36 }, { x: -0.12, y: -0.22 }, { x: 0.12, y: -0.22 },
+    { x: 0.32, y: -0.38 }, { x: 0.52, y: -0.18 }, { x: 0.35, y: -0.02 }, { x: 0.50, y: 0.20 },
+    { x: 0.22, y: 0.16 }, { x: 0.08, y: 0.34 }, { x: -0.08, y: 0.34 }, { x: -0.22, y: 0.16 },
+    { x: -0.50, y: 0.20 }, { x: -0.34, y: -0.02 },
+  ],
+  fish: [
+    { x: -0.56, y: 0.00 }, { x: -0.36, y: -0.24 }, { x: -0.08, y: -0.28 }, { x: 0.24, y: -0.18 },
+    { x: 0.54, y: -0.32 }, { x: 0.42, y: 0.00 }, { x: 0.54, y: 0.32 }, { x: 0.24, y: 0.18 },
+    { x: -0.08, y: 0.28 }, { x: -0.36, y: 0.24 },
+  ],
+  sea_monster: [
+    { x: -0.56, y: -0.05 }, { x: -0.32, y: -0.28 }, { x: -0.06, y: -0.22 }, { x: 0.20, y: -0.36 },
+    { x: 0.52, y: -0.16 }, { x: 0.38, y: 0.03 }, { x: 0.55, y: 0.25 }, { x: 0.20, y: 0.18 },
+    { x: -0.02, y: 0.36 }, { x: -0.28, y: 0.20 }, { x: -0.50, y: 0.16 },
+  ],
+  serpent: [
+    { x: -0.56, y: -0.10 }, { x: -0.30, y: -0.26 }, { x: -0.05, y: -0.10 }, { x: 0.18, y: -0.26 },
+    { x: 0.52, y: -0.12 }, { x: 0.38, y: 0.08 }, { x: 0.10, y: 0.02 }, { x: -0.08, y: 0.22 },
+    { x: -0.38, y: 0.28 }, { x: -0.52, y: 0.10 },
+  ],
+  dragon: [
+    { x: -0.54, y: -0.16 }, { x: -0.30, y: -0.34 }, { x: -0.08, y: -0.12 }, { x: 0.14, y: -0.30 },
+    { x: 0.44, y: -0.18 }, { x: 0.56, y: 0.02 }, { x: 0.34, y: 0.12 }, { x: 0.10, y: 0.02 },
+    { x: -0.08, y: 0.28 }, { x: -0.34, y: 0.36 }, { x: -0.52, y: 0.16 },
+  ],
+  swan: [
+    { x: -0.56, y: 0.02 }, { x: -0.25, y: -0.20 }, { x: -0.05, y: -0.50 }, { x: 0.10, y: -0.17 },
+    { x: 0.42, y: -0.36 }, { x: 0.26, y: -0.02 }, { x: 0.55, y: 0.15 }, { x: 0.12, y: 0.18 },
+    { x: -0.06, y: 0.50 }, { x: -0.23, y: 0.18 },
+  ],
+  eagle: [
+    { x: -0.56, y: -0.05 }, { x: -0.12, y: -0.34 }, { x: 0.03, y: -0.16 }, { x: 0.46, y: -0.34 },
+    { x: 0.30, y: -0.02 }, { x: 0.56, y: 0.16 }, { x: 0.16, y: 0.12 }, { x: 0.02, y: 0.46 },
+    { x: -0.14, y: 0.10 }, { x: -0.54, y: 0.18 },
+  ],
+  bird: [
+    { x: -0.56, y: -0.03 }, { x: -0.15, y: -0.28 }, { x: 0.02, y: -0.10 }, { x: 0.44, y: -0.26 },
+    { x: 0.26, y: 0.00 }, { x: 0.54, y: 0.14 }, { x: 0.12, y: 0.12 }, { x: -0.02, y: 0.42 },
+    { x: -0.18, y: 0.12 }, { x: -0.54, y: 0.16 },
+  ],
+  peacock: [
+    { x: -0.50, y: 0.20 }, { x: -0.34, y: -0.36 }, { x: -0.08, y: -0.50 }, { x: 0.22, y: -0.38 },
+    { x: 0.52, y: -0.04 }, { x: 0.30, y: 0.14 }, { x: 0.46, y: 0.44 }, { x: 0.05, y: 0.26 },
+    { x: -0.22, y: 0.44 },
+  ],
+  phoenix: [
+    { x: -0.56, y: 0.10 }, { x: -0.16, y: -0.40 }, { x: 0.02, y: -0.18 }, { x: 0.42, y: -0.46 },
+    { x: 0.28, y: -0.08 }, { x: 0.56, y: 0.10 }, { x: 0.18, y: 0.14 }, { x: 0.06, y: 0.52 },
+    { x: -0.14, y: 0.16 },
+  ],
+  dolphin: [
+    { x: -0.52, y: 0.08 }, { x: -0.30, y: -0.20 }, { x: 0.08, y: -0.28 }, { x: 0.42, y: -0.10 },
+    { x: 0.56, y: -0.28 }, { x: 0.48, y: 0.06 }, { x: 0.20, y: 0.24 }, { x: -0.10, y: 0.20 },
+    { x: -0.36, y: 0.32 },
+  ],
+  ship: [
+    { x: -0.56, y: -0.06 }, { x: -0.20, y: -0.22 }, { x: 0.10, y: -0.18 }, { x: 0.44, y: -0.02 },
+    { x: 0.54, y: 0.18 }, { x: 0.26, y: 0.36 }, { x: -0.24, y: 0.34 }, { x: -0.48, y: 0.16 },
+  ],
+  instrument: [
+    { x: -0.52, y: -0.12 }, { x: -0.22, y: -0.36 }, { x: 0.26, y: -0.34 }, { x: 0.52, y: -0.06 },
+    { x: 0.34, y: 0.28 }, { x: 0.02, y: 0.42 }, { x: -0.34, y: 0.28 },
+  ],
+  lyre: [
+    { x: -0.44, y: -0.38 }, { x: 0.44, y: -0.38 }, { x: 0.34, y: 0.26 }, { x: 0.12, y: 0.48 },
+    { x: -0.12, y: 0.48 }, { x: -0.34, y: 0.26 },
+  ],
+  crown: [
+    { x: -0.54, y: 0.18 }, { x: -0.36, y: -0.20 }, { x: -0.14, y: 0.06 }, { x: 0.00, y: -0.34 },
+    { x: 0.16, y: 0.06 }, { x: 0.38, y: -0.20 }, { x: 0.54, y: 0.18 }, { x: 0.28, y: 0.36 },
+    { x: -0.28, y: 0.36 },
+  ],
+  triangle: [
+    { x: 0.00, y: -0.52 }, { x: 0.52, y: 0.42 }, { x: -0.52, y: 0.42 },
+  ],
+  arrow: [
+    { x: -0.56, y: -0.06 }, { x: 0.18, y: -0.06 }, { x: 0.18, y: -0.22 }, { x: 0.56, y: 0.00 },
+    { x: 0.18, y: 0.22 }, { x: 0.18, y: 0.06 }, { x: -0.56, y: 0.06 },
+  ],
+  shield: [
+    { x: -0.44, y: -0.48 }, { x: 0.44, y: -0.48 }, { x: 0.50, y: 0.02 }, { x: 0.20, y: 0.48 },
+    { x: 0.00, y: 0.56 }, { x: -0.20, y: 0.48 }, { x: -0.50, y: 0.02 },
+  ],
+  cup: [
+    { x: -0.50, y: -0.42 }, { x: 0.50, y: -0.42 }, { x: 0.30, y: 0.18 }, { x: 0.08, y: 0.24 },
+    { x: 0.08, y: 0.44 }, { x: 0.34, y: 0.52 }, { x: -0.34, y: 0.52 }, { x: -0.08, y: 0.44 },
+    { x: -0.08, y: 0.24 }, { x: -0.30, y: 0.18 },
+  ],
+  scales: [
+    { x: -0.52, y: -0.22 }, { x: 0.52, y: -0.22 }, { x: 0.36, y: -0.02 }, { x: 0.52, y: 0.28 },
+    { x: 0.22, y: 0.28 }, { x: 0.00, y: 0.02 }, { x: -0.22, y: 0.28 }, { x: -0.52, y: 0.28 },
+    { x: -0.36, y: -0.02 },
+  ],
+  altar: [
+    { x: -0.40, y: -0.46 }, { x: 0.40, y: -0.46 }, { x: 0.28, y: -0.18 }, { x: 0.36, y: 0.48 },
+    { x: -0.36, y: 0.48 }, { x: -0.28, y: -0.18 },
+  ],
+  cross: [
+    { x: -0.13, y: -0.54 }, { x: 0.13, y: -0.54 }, { x: 0.13, y: -0.12 }, { x: 0.52, y: -0.12 },
+    { x: 0.52, y: 0.12 }, { x: 0.13, y: 0.12 }, { x: 0.13, y: 0.54 }, { x: -0.13, y: 0.54 },
+    { x: -0.13, y: 0.12 }, { x: -0.52, y: 0.12 }, { x: -0.52, y: -0.12 }, { x: -0.13, y: -0.12 },
+  ],
+};
+
+const DEFAULT_SILHOUETTE = [
+  { x: -0.42, y: -0.44 }, { x: 0.08, y: -0.52 }, { x: 0.46, y: -0.24 }, { x: 0.52, y: 0.10 },
+  { x: 0.24, y: 0.46 }, { x: -0.16, y: 0.52 }, { x: -0.50, y: 0.18 },
+];
+
+const getSilhouetteGroup = (constellation) => (
+  SILHOUETTE_GROUP_BY_ABBR[constellation?.abbr] || 'default'
+);
+
+const getSilhouetteTemplate = (constellation) => (
+  SILHOUETTE_TEMPLATES[getSilhouetteGroup(constellation)] || DEFAULT_SILHOUETTE
+);
+
+const getSilhouetteDetailLines = (constellation) => (
+  SILHOUETTE_DETAIL_LINES[getSilhouetteGroup(constellation)] || []
+);
+
+const getPolygonBounds = (points) => ({
+  minX: Math.min(...points.map((point) => point.x)),
+  maxX: Math.max(...points.map((point) => point.x)),
+  minY: Math.min(...points.map((point) => point.y)),
+  maxY: Math.max(...points.map((point) => point.y)),
+});
+
+const buildMythicSilhouette = (constellation, points, settings) => {
+  if (points.length < 2) {
+    return { outline: [
+      { x: -settings.cardWidthMm / 2, y: -settings.cardWidthMm / 5 },
+      { x: settings.cardWidthMm / 2, y: -settings.cardWidthMm / 5 },
+      { x: settings.cardWidthMm / 2, y: settings.cardWidthMm / 5 },
+      { x: -settings.cardWidthMm / 2, y: settings.cardWidthMm / 5 },
+    ], detailLines: [] };
+  }
+
+  const template = getSilhouetteTemplate(constellation);
+  const templateDetailLines = getSilhouetteDetailLines(constellation);
+  const templateBounds = getPolygonBounds(template);
+  const pointBounds = getPolygonBounds(points);
+  const pointWidth = Math.max(1, pointBounds.maxX - pointBounds.minX);
+  const pointHeight = Math.max(1, pointBounds.maxY - pointBounds.minY);
+  const targetWidth = pointWidth + settings.outlinePaddingMm * 2.6;
+  const targetHeight = pointHeight + settings.outlinePaddingMm * 2.6;
+  const templateWidth = Math.max(0.1, templateBounds.maxX - templateBounds.minX);
+  const templateHeight = Math.max(0.1, templateBounds.maxY - templateBounds.minY);
+  const cx = (pointBounds.minX + pointBounds.maxX) / 2;
+  const cy = (pointBounds.minY + pointBounds.maxY) / 2;
+  let scale = Math.max(targetWidth / templateWidth, targetHeight / templateHeight);
+
+  const createOutline = () => template.map((point) => ({
+    x: cx + point.x * scale,
+    y: cy + point.y * scale,
+  }));
+  const transformPoint = (point) => ({
+    x: cx + point.x * scale,
+    y: cy + point.y * scale,
+  });
+
+  let outline = createOutline();
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (points.every((point) => pointInPolygon(point, outline))) break;
+    scale *= 1.12;
+    outline = createOutline();
+  }
+
+  const detailLines = templateDetailLines.map((line) => line.map(transformPoint));
+  return { outline, detailLines };
+};
+
+const pointInPolygon = (point, polygon) => {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersects = ((yi > point.y) !== (yj > point.y)) &&
+      (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+};
+
+const projectConstellationModel = (constellation, starsMap, settings) => {
+  if (!constellation) return null;
+  const hips = getConstellationStarHipsFromEdges(constellation.edges);
+  const sourceStars = hips.map((hip) => starsMap.get(hip)).filter(Boolean);
+  if (sourceStars.length === 0) return null;
+
+  const sinRa = sourceStars.reduce((sum, star) => sum + Math.sin(star.ra * Math.PI / 180), 0);
+  const cosRa = sourceStars.reduce((sum, star) => sum + Math.cos(star.ra * Math.PI / 180), 0);
+  const centerRa = (Math.atan2(sinRa, cosRa) * 180 / Math.PI + 360) % 360;
+  const centerDec = sourceStars.reduce((sum, star) => sum + star.dec, 0) / sourceStars.length;
+  const decScale = Math.cos(centerDec * Math.PI / 180);
+  const rawPoints = sourceStars.map((star) => {
+    let deltaRa = star.ra - centerRa;
+    if (deltaRa > 180) deltaRa -= 360;
+    if (deltaRa < -180) deltaRa += 360;
+    return {
+      hip: star.hip,
+      x: deltaRa * decScale,
+      y: -(star.dec - centerDec),
+      mag: star.mag,
+      nameEn: star.nameEn,
+      nameZh: star.nameZh,
+    };
+  });
+
+  const minX = Math.min(...rawPoints.map((point) => point.x));
+  const maxX = Math.max(...rawPoints.map((point) => point.x));
+  const minY = Math.min(...rawPoints.map((point) => point.y));
+  const maxY = Math.max(...rawPoints.map((point) => point.y));
+  const rawWidth = Math.max(0.1, maxX - minX);
+  const rawHeight = Math.max(0.1, maxY - minY);
+  const contentWidth = Math.max(20, settings.cardWidthMm - settings.outlinePaddingMm * 2);
+  const scale = contentWidth / Math.max(rawWidth, rawHeight);
+  const offsetX = -((minX + maxX) / 2) * scale;
+  const offsetY = -((minY + maxY) / 2) * scale;
+  const points = rawPoints.map((point) => ({
+    ...point,
+    x: point.x * scale + offsetX,
+    y: point.y * scale + offsetY,
+  }));
+  const { outline, detailLines } = buildMythicSilhouette(constellation, points, settings);
+  const edges = constellation.edges
+    .map(([fromHip, toHip]) => {
+      const from = points.find((point) => point.hip === fromHip);
+      const to = points.find((point) => point.hip === toHip);
+      return from && to ? { from, to } : null;
+    })
+    .filter(Boolean);
+
+  return { points, edges, outline, detailLines, silhouetteGroup: getSilhouetteGroup(constellation) };
+};
+
+const makeFacet = (a, b, c) => (
+  `  facet normal 0 0 0\n    outer loop\n      vertex ${a[0].toFixed(4)} ${a[1].toFixed(4)} ${a[2].toFixed(4)}\n      vertex ${b[0].toFixed(4)} ${b[1].toFixed(4)} ${b[2].toFixed(4)}\n      vertex ${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)}\n    endloop\n  endfacet\n`
+);
+
+const makeQuad = (a, b, c, d) => makeFacet(a, b, c) + makeFacet(a, c, d);
+
+const createConstellationStl = (model, settings, name) => {
+  const xs = model.outline.map((point) => point.x);
+  const ys = model.outline.map((point) => point.y);
+  const minX = Math.floor(Math.min(...xs));
+  const maxX = Math.ceil(Math.max(...xs));
+  const minY = Math.floor(Math.min(...ys));
+  const maxY = Math.ceil(Math.max(...ys));
+  const targetCells = 94;
+  const cell = Math.max(1.2, Math.max(maxX - minX, maxY - minY) / targetCells);
+  const cols = Math.ceil((maxX - minX) / cell);
+  const rows = Math.ceil((maxY - minY) / cell);
+  const bottomZ = 0;
+  const topZ = settings.baseThicknessMm + settings.reliefHeightMm;
+  const grooveZ = Math.max(settings.baseThicknessMm * 0.35, topZ - settings.grooveDepthMm);
+  const grooveRadius = settings.grooveDiameterMm / 2;
+  const heights = [];
+
+  for (let row = 0; row < rows; row++) {
+    heights[row] = [];
+    for (let col = 0; col < cols; col++) {
+      const x = minX + (col + 0.5) * cell;
+      const y = minY + (row + 0.5) * cell;
+      if (!pointInPolygon({ x, y }, model.outline)) {
+        heights[row][col] = null;
+        continue;
+      }
+      const inGroove = model.points.some((star) => Math.hypot(star.x - x, star.y - y) <= grooveRadius);
+      heights[row][col] = inGroove ? grooveZ : topZ;
+    }
+  }
+
+  let facets = `solid ${name}\n`;
+  const corner = (col, row, z) => [minX + col * cell, minY + row * cell, z];
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const height = heights[row][col];
+      if (height === null) continue;
+      const a = corner(col, row, height);
+      const b = corner(col + 1, row, height);
+      const c = corner(col + 1, row + 1, height);
+      const d = corner(col, row + 1, height);
+      facets += makeQuad(a, b, c, d);
+      facets += makeQuad(corner(col, row, bottomZ), corner(col, row + 1, bottomZ), corner(col + 1, row + 1, bottomZ), corner(col + 1, row, bottomZ));
+
+      const neighbors = [
+        { dc: 0, dr: -1, side: [corner(col, row, bottomZ), corner(col + 1, row, bottomZ), b, a] },
+        { dc: 1, dr: 0, side: [corner(col + 1, row, bottomZ), corner(col + 1, row + 1, bottomZ), c, b] },
+        { dc: 0, dr: 1, side: [corner(col + 1, row + 1, bottomZ), corner(col, row + 1, bottomZ), d, c] },
+        { dc: -1, dr: 0, side: [corner(col, row + 1, bottomZ), corner(col, row, bottomZ), a, d] },
+      ];
+
+      for (const neighbor of neighbors) {
+        const nextHeight = heights[row + neighbor.dr]?.[col + neighbor.dc] ?? null;
+        if (nextHeight === null) {
+          facets += makeQuad(...neighbor.side);
+        } else if (Math.abs(nextHeight - height) > 0.001) {
+          const high = Math.max(nextHeight, height);
+          const low = Math.min(nextHeight, height);
+          const [p0, p1] = neighbor.side;
+          facets += makeQuad([p0[0], p0[1], low], [p1[0], p1[1], low], [p1[0], p1[1], high], [p0[0], p0[1], high]);
+        }
+      }
+    }
+  }
+  facets += `endsolid ${name}\n`;
+  return facets;
+};
 
 const POSTER_COPY_PRESETS = {
   en: {
@@ -122,6 +762,8 @@ const POSTER_COPY_PRESETS = {
 const UI_TEXT = {
   en: {
     appSubtitle: 'All-sky constellation poster generator',
+    posterPageLink: 'Star Map Poster',
+    constellation3dPageLink: '3D Printed Constellations',
     loading: 'Loading all-sky stars and constellation data...',
     loadingSubtext: 'First load may take a few seconds',
     loadError: 'Unable to load star map data. Please confirm the ingestion script has run.',
@@ -198,9 +840,27 @@ const UI_TEXT = {
     renderingPdf: 'Rendering tiled A4 PDF...',
     exportedPdf: 'Exported tiled A4 PDF.',
     exportPdfFailed: 'PDF export failed. Check the console log.',
+    print3dTitle: '3D Printed Constellations',
+    print3dSubtitle: 'Export constellation-shaped relief cards for glow-powder star wells.',
+    print3dConstellation: 'Constellation',
+    print3dCardWidth: 'Card Width',
+    print3dBaseThickness: 'Base Thickness',
+    print3dReliefHeight: 'Raised Relief',
+    print3dGrooveDiameter: 'Star Groove Diameter',
+    print3dGrooveDepth: 'Star Groove Depth',
+    print3dOutlinePadding: 'Shape Padding',
+    print3dExportStl: 'Export STL',
+    print3dDesignNotes: 'Print Notes',
+    print3dNoteShape: 'The card outline follows the constellation footprint instead of a fixed rectangle.',
+    print3dNoteGroove: 'Star dots are recessed wells for glow powder and deer-glue binder.',
+    print3dNoteMount: 'Print the model flat, fill the wells after curing, then mount it on the ceiling.',
+    exportedStl: 'Exported constellation STL model.',
+    exportStlFailed: 'STL export failed. Check the current constellation data.',
   },
   zh: {
     appSubtitle: '全天星座星图印刷海报生成器',
+    posterPageLink: '星图海报',
+    constellation3dPageLink: '3D 打印的星座',
     loading: '正在加载全天恒星与星座数据源...',
     loadingSubtext: '首次加载可能需要几秒钟',
     loadError: '无法加载星图数据，请确认是否已运行 Ingestion 脚本。',
@@ -277,6 +937,22 @@ const UI_TEXT = {
     renderingPdf: '正在生成 A4 拼接 PDF...',
     exportedPdf: '成功导出 A4 拼接 PDF。',
     exportPdfFailed: '导出 PDF 失败，请查看控制台日志。',
+    print3dTitle: '3D 打印的星座',
+    print3dSubtitle: '导出星座形状的浮雕卡片，星点为可填荧光粉与鹿胶合剂的凹槽。',
+    print3dConstellation: '星座',
+    print3dCardWidth: '卡片宽度',
+    print3dBaseThickness: '底板厚度',
+    print3dReliefHeight: '浮雕高度',
+    print3dGrooveDiameter: '星点凹槽直径',
+    print3dGrooveDepth: '星点凹槽深度',
+    print3dOutlinePadding: '轮廓留边',
+    print3dExportStl: '导出 STL 模型',
+    print3dDesignNotes: '打印说明',
+    print3dNoteShape: '卡片轮廓跟随星座恒星与连线的形态，不使用固定矩形。',
+    print3dNoteGroove: '星点是带厚度的凹槽，可在内部填入荧光粉与鹿胶合剂。',
+    print3dNoteMount: '模型平放打印，固化后填充星点，再贴到室内天花板。',
+    exportedStl: '已导出星座 STL 模型。',
+    exportStlFailed: '导出 STL 失败，请检查当前星座数据。',
   },
 };
 
@@ -463,6 +1139,7 @@ function App() {
   const posterMockupRef = useRef(null);
   const transformRef = useRef({ scale: 1, x: 0, y: 0 });
   const dragStateRef = useRef(null);
+  const modelDragStateRef = useRef(null);
   const activePointersRef = useRef(new Map());
   const pinchStateRef = useRef(null);
   const gestureStateRef = useRef(null);
@@ -479,9 +1156,12 @@ function App() {
   const sphereRequestIdRef = useRef(0);
 
   // --- Poster & Layout Settings ---
+  const [currentPage, setCurrentPage] = useState(getInitialPage);
   const [labelLanguageMode, setLabelLanguageMode] = useState(getInitialLanguageMode);
   const displayLanguage = getDisplayLanguage(labelLanguageMode);
   const uiText = UI_TEXT[displayLanguage];
+  const [modelSettings, setModelSettings] = useState(DEFAULT_3D_MODEL_SETTINGS);
+  const [modelView, setModelView] = useState(DEFAULT_3D_VIEW);
   const [titleOverrides, setTitleOverrides] = useState({});
   const [customNoteOverrides, setCustomNoteOverrides] = useState({});
   const title = titleOverrides[displayLanguage] ?? POSTER_COPY_PRESETS[displayLanguage].title;
@@ -593,6 +1273,16 @@ function App() {
     window.history.replaceState(null, '', url);
   }, [labelLanguageMode]);
 
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (currentPage === 'poster') {
+      url.searchParams.delete('page');
+    } else {
+      url.searchParams.set('page', currentPage);
+    }
+    window.history.replaceState(null, '', url);
+  }, [currentPage]);
+
   useEffect(() => () => {
     if (renderNoticeTimerRef.current !== null) {
       clearTimeout(renderNoticeTimerRef.current);
@@ -679,6 +1369,16 @@ function App() {
     }
     return map;
   }, [stars]);
+
+  const selected3dConstellation = useMemo(() => (
+    westernConstellations.find((constellation) => constellation.abbr === modelSettings.constellationAbbr) ||
+    westernConstellations.find((constellation) => constellation.abbr === DEFAULT_3D_MODEL_SETTINGS.constellationAbbr) ||
+    westernConstellations[0]
+  ), [westernConstellations, modelSettings.constellationAbbr]);
+
+  const constellation3dModel = useMemo(() => (
+    projectConstellationModel(selected3dConstellation, starsMap, modelSettings)
+  ), [selected3dConstellation, starsMap, modelSettings]);
 
   // --- Centroid Calculation for Constellations (Spherical Average) ---
   const getConstellationCentroid = (edges) => {
@@ -2456,6 +3156,22 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const exportConstellationStl = () => {
+    if (!constellation3dModel || !selected3dConstellation) {
+      showToast(uiText.exportStlFailed);
+      return;
+    }
+    try {
+      const modelName = `${selected3dConstellation.abbr.toLowerCase()}_glow_constellation_card`;
+      const stl = createConstellationStl(constellation3dModel, modelSettings, modelName);
+      downloadBlob(new Blob([stl], { type: 'model/stl' }), `${modelName}.stl`);
+      showToast(uiText.exportedStl);
+    } catch (e) {
+      console.error(e);
+      showToast(uiText.exportStlFailed);
+    }
+  };
+
   const canvasToBlob = (canvas, type = 'image/jpeg', quality = 0.92) => (
     new Promise((resolve) => canvas.toBlob(resolve, type, quality))
   );
@@ -2694,6 +3410,249 @@ function App() {
     }, 100);
   };
 
+  const updateModelSetting = (key, value) => {
+    setModelSettings((current) => ({ ...current, [key]: value }));
+  };
+
+  const handleModelPointerDown = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    modelDragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      viewMatrix: modelView.viewMatrix,
+      modelMatrix: modelView.modelMatrix,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const handleModelPointerMove = (event) => {
+    const dragState = modelDragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - dragState.startX;
+    const deltaY = event.clientY - dragState.startY;
+    const localSpinAroundNormal = rotationZMatrix(-deltaX * 0.35);
+    const spunAroundModelNormal = multiplyMatrix4(dragState.modelMatrix, localSpinAroundNormal);
+    const limitedViewMatrix = applyLimitedViewPitch(dragState.viewMatrix, -deltaY * 0.35);
+    setModelView((current) => ({
+      ...current,
+      viewMatrix: limitedViewMatrix,
+      modelMatrix: spunAroundModelNormal,
+    }));
+  };
+
+  const stopModelPointerDrag = (event) => {
+    if (modelDragStateRef.current?.pointerId !== event.pointerId) return;
+    modelDragStateRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+
+  const handleModelWheel = (event) => {
+    event.preventDefault();
+    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+    const zoomFactor = Math.exp(-delta * 0.0015);
+    setModelView((current) => ({
+      ...current,
+      scale: clampModelScale(current.scale * zoomFactor),
+    }));
+  };
+
+  const renderModelRange = (key, label, min, max, step, unit = 'mm') => (
+    <div className="form-field">
+      <label>
+        {label} <span className="value">{modelSettings[key].toFixed(step < 1 ? 1 : 0)} {unit}</span>
+      </label>
+      <input
+        type="range"
+        className="slider-input"
+        min={min}
+        max={max}
+        step={step}
+        value={modelSettings[key]}
+        onChange={(e) => updateModelSetting(key, Number(e.target.value))}
+      />
+    </div>
+  );
+
+  const renderConstellation3dPage = () => {
+    const outline = constellation3dModel?.outline ?? [];
+    const points = constellation3dModel?.points ?? [];
+    const edges = constellation3dModel?.edges ?? [];
+    const detailLines = constellation3dModel?.detailLines ?? [];
+    const bounds = outline.length > 0 ? {
+      minX: Math.min(...outline.map((point) => point.x)),
+      maxX: Math.max(...outline.map((point) => point.x)),
+      minY: Math.min(...outline.map((point) => point.y)),
+      maxY: Math.max(...outline.map((point) => point.y)),
+    } : { minX: -70, maxX: 70, minY: -70, maxY: 70 };
+    const width = Math.max(20, bounds.maxX - bounds.minX);
+    const height = Math.max(20, bounds.maxY - bounds.minY);
+    const pad = 18;
+    const viewBox = `${bounds.minX - pad} ${bounds.minY - pad} ${width + pad * 2} ${height + pad * 2}`;
+    const outlinePoints = outline.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+
+    return (
+      <>
+        <aside className="sidebar">
+          <header className="sidebar-header">
+            <h1><span>ALLSKY</span> ATLAS</h1>
+            <p>{uiText.appSubtitle}</p>
+            <nav className="sidebar-page-links" aria-label="Feature navigation">
+              <button type="button" onClick={() => setCurrentPage('poster')}>{uiText.posterPageLink}</button>
+              <button type="button" className="active" onClick={() => setCurrentPage('constellation-3d')}>{uiText.constellation3dPageLink}</button>
+            </nav>
+          </header>
+
+          <div className="sidebar-content">
+            <div className="control-group">
+              <h3 className="control-group-title">{uiText.print3dTitle}</h3>
+              <div className="form-field">
+                <label>{uiText.print3dConstellation}</label>
+                <select
+                  className="select-input"
+                  value={selected3dConstellation?.abbr ?? modelSettings.constellationAbbr}
+                  onChange={(e) => updateModelSetting('constellationAbbr', e.target.value)}
+                >
+                  {[...westernConstellations]
+                    .sort((a, b) => a.nameEn.localeCompare(b.nameEn))
+                    .map((constellation) => (
+                      <option key={constellation.abbr} value={constellation.abbr}>
+                        {displayLanguage === 'zh'
+                          ? `${constellation.nameZh} (${constellation.nameEn})`
+                          : `${constellation.nameEn} (${constellation.abbr})`}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              {renderModelRange('cardWidthMm', uiText.print3dCardWidth, 70, 180, 1)}
+              {renderModelRange('baseThicknessMm', uiText.print3dBaseThickness, 1.2, 6, 0.1)}
+              {renderModelRange('reliefHeightMm', uiText.print3dReliefHeight, 0.4, 4, 0.1)}
+              {renderModelRange('grooveDiameterMm', uiText.print3dGrooveDiameter, 2.4, 10, 0.1)}
+              {renderModelRange('grooveDepthMm', uiText.print3dGrooveDepth, 0.4, 3.5, 0.1)}
+              {renderModelRange('outlinePaddingMm', uiText.print3dOutlinePadding, 4, 24, 0.5)}
+            </div>
+
+            <div className="control-group">
+              <button className="btn-primary" onClick={exportConstellationStl}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                {uiText.print3dExportStl}
+              </button>
+            </div>
+
+            <div className="control-group">
+              <h3 className="control-group-title">{uiText.print3dDesignNotes}</h3>
+              <p className="control-tip">{uiText.print3dNoteShape}</p>
+              <p className="control-tip">{uiText.print3dNoteGroove}</p>
+              <p className="control-tip">{uiText.print3dNoteMount}</p>
+            </div>
+          </div>
+
+          <footer className="sidebar-footer">
+            <p>© 2026 Astronomy Poster Builder</p>
+          </footer>
+        </aside>
+
+        <main className="constellation-3d-area">
+          {(toast || isPosterRendering) && (
+            <div className="preview-toast-stack" aria-live="polite">
+              {toast && <div className="toast" role="status">{toast}</div>}
+            </div>
+          )}
+          <section className="constellation-3d-workbench">
+            <div className="constellation-3d-heading">
+              <div>
+                <p>{uiText.print3dTitle}</p>
+                <h2>{displayLanguage === 'zh' ? selected3dConstellation?.nameZh : selected3dConstellation?.nameEn}</h2>
+              </div>
+              <span>{selected3dConstellation?.abbr}</span>
+            </div>
+            <div
+              className="constellation-3d-preview"
+              onPointerDown={handleModelPointerDown}
+              onPointerMove={handleModelPointerMove}
+              onPointerUp={stopModelPointerDrag}
+              onPointerCancel={stopModelPointerDrag}
+              onWheel={handleModelWheel}
+            >
+              <div
+                className="constellation-3d-camera"
+                style={{
+                  transform: matrixToCssMatrix3d(modelView.viewMatrix),
+                }}
+              >
+                <div
+                  className="constellation-3d-model"
+                  style={{
+                    transform: `${matrixToCssMatrix3d(modelView.modelMatrix)} scale(${modelView.scale})`,
+                  }}
+                >
+                  <svg viewBox={viewBox} role="img" aria-label={uiText.print3dTitle}>
+                    <defs>
+                      <filter id="star-well-shadow" x="-20%" y="-20%" width="140%" height="140%">
+                        <feDropShadow dx="0" dy="1.4" stdDeviation="1.2" floodColor="#000000" floodOpacity="0.55" />
+                      </filter>
+                    </defs>
+                    <polygon points={outlinePoints} className="model-outline" />
+                    {detailLines.map((line, index) => (
+                      <polyline
+                        key={`model-detail-${index}`}
+                        points={line.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ')}
+                        className="model-detail-line"
+                      />
+                    ))}
+                    {edges.map((edge, index) => (
+                      <line
+                        key={`model-edge-${index}`}
+                        x1={edge.from.x}
+                        y1={edge.from.y}
+                        x2={edge.to.x}
+                        y2={edge.to.y}
+                        className="model-ridge"
+                      />
+                    ))}
+                    {points.map((point) => (
+                      <g key={point.hip} filter="url(#star-well-shadow)">
+                        <circle
+                          cx={point.x}
+                          cy={point.y}
+                          r={modelSettings.grooveDiameterMm / 2}
+                          className="model-star-well"
+                        />
+                        <circle
+                          cx={point.x}
+                          cy={point.y}
+                          r={Math.max(0.8, modelSettings.grooveDiameterMm / 5)}
+                          className="model-star-core"
+                        />
+                      </g>
+                    ))}
+                  </svg>
+                  <div className="model-axis-layer" aria-hidden="true">
+                    <span className="model-axis model-axis-x"><b>X</b></span>
+                    <span className="model-axis model-axis-y"><b>Y</b></span>
+                    <span className="model-axis model-axis-z"><b>Z</b></span>
+                    <span className="model-axis-origin"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="constellation-3d-specs">
+              <span>{modelSettings.cardWidthMm.toFixed(0)} mm</span>
+              <span>{points.length} stars</span>
+              <span>{edges.length} lines</span>
+              <span>{Math.round(modelView.scale * 100)}% view</span>
+            </div>
+            <div className="constellation-3d-axis-legend" aria-label="Model local axes">
+              <span><i className="axis-color-x"></i>X 本地左右</span>
+              <span><i className="axis-color-y"></i>Y 本地竖直</span>
+              <span><i className="axis-color-z"></i>Z 表面法线</span>
+            </div>
+          </section>
+        </main>
+      </>
+    );
+  };
+
   if (loading) {
     return (
       <div className="loading-overlay">
@@ -2715,11 +3674,17 @@ function App() {
 
   return (
     <div className="app-container">
+      {currentPage === 'constellation-3d' ? renderConstellation3dPage() : (
+      <>
       {/* Glassmorphic Sidebar Controls */}
       <aside className="sidebar">
         <header className="sidebar-header">
           <h1><span>ALLSKY</span> ATLAS</h1>
           <p>{uiText.appSubtitle}</p>
+          <nav className="sidebar-page-links" aria-label="Feature navigation">
+            <button type="button" className="active" onClick={() => setCurrentPage('poster')}>{uiText.posterPageLink}</button>
+            <button type="button" onClick={() => setCurrentPage('constellation-3d')}>{uiText.constellation3dPageLink}</button>
+          </nav>
         </header>
 
         <div className="sidebar-content">
@@ -3430,6 +4395,8 @@ function App() {
           <div>viewport={inputProbe.visualScale} target={inputProbe.target || '-'}</div>
           <div>{inputProbe.time}</div>
         </div>
+      )}
+      </>
       )}
     </div>
   );
