@@ -173,6 +173,13 @@ body {
   margin: 0;
 }
 
+.control-subgroup-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 /* Form inputs */
 .form-field {
   display: flex;
@@ -400,6 +407,25 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.22);
+}
+
+.segmented-control-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.constellation-line-style-toggle {
+  width: 148px;
+  flex: 0 0 148px;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.constellation-line-style-toggle .segment-button {
+  min-height: 24px;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 10px;
 }
 
 .inline-toggle-field {

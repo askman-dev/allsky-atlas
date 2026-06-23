@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useTransition } from 'react';
+import { useState, useEffect, useMemo, useRef, useTransition, useCallback } from 'react';
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
@@ -48,6 +48,18 @@ const CONSTELLATION_FILL_PALETTE = [
   '#e78ac3',
 ];
 const APP_PAGES = new Set(['poster', 'constellation-3d']);
+const WESTERN_LINE_STYLE_OFF = 'off';
+const WESTERN_LINE_STYLE_MODERN = 'modern';
+const WESTERN_LINE_STYLE_SKY_TELESCOPE = 'sky_telescope';
+const WESTERN_LINE_STYLE_OPTIONS = [
+  WESTERN_LINE_STYLE_OFF,
+  WESTERN_LINE_STYLE_MODERN,
+  WESTERN_LINE_STYLE_SKY_TELESCOPE,
+];
+const DEFAULT_WESTERN_LINE_STYLE = WESTERN_LINE_STYLE_MODERN;
+const normalizeWesternLineStyle = (style) => (
+  WESTERN_LINE_STYLE_OPTIONS.includes(style) ? style : DEFAULT_WESTERN_LINE_STYLE
+);
 const DEFAULT_3D_MODEL_SETTINGS = {
   constellationAbbr: 'ORI',
   cardWidthMm: 120,
@@ -174,7 +186,7 @@ const DEFAULT_RENDER_SETTINGS = {
   overlapDec: 20,
   northRotation: 0,
   southRotation: 0,
-  showWesternLines: true,
+  westernLineStyle: DEFAULT_WESTERN_LINE_STYLE,
   showWesternBoundaries: true,
   showWesternBoundaryFills: false,
   showWesternNames: true,
@@ -849,7 +861,10 @@ const UI_TEXT = {
     southRotation: 'South Map Rotation',
     layerDisplay: 'Star Map Layers',
     modernConstellations: 'Modern Constellations',
-    constellationLines: 'Constellation Lines',
+    constellationLineSet: 'Constellation Line Set',
+    constellationLineStyleOff: 'Off',
+    constellationLineStyleModern: 'Modern',
+    constellationLineStyleSkyTelescope: 'S&T',
     constellationNames: 'Constellation Names',
     iauBoundaries: 'IAU Constellation Boundaries',
     constellationRegionColors: 'Constellation Region Colors',
@@ -954,7 +969,10 @@ const UI_TEXT = {
     southRotation: '南天图旋转角度',
     layerDisplay: '星空图层显示',
     modernConstellations: '现代星座',
-    constellationLines: '星座连线',
+    constellationLineSet: '星座连线方案',
+    constellationLineStyleOff: '关闭',
+    constellationLineStyleModern: '现代',
+    constellationLineStyleSkyTelescope: 'S&T',
     constellationNames: '星座名称',
     iauBoundaries: 'IAU 星座边界',
     constellationRegionColors: '星座区域着色',
@@ -1745,6 +1763,7 @@ function App() {
   // --- State Variables ---
   const [stars, setStars] = useState([]);
   const [westernConstellations, setWesternConstellations] = useState([]);
+  const [westernStConstellations, setWesternStConstellations] = useState([]);
   const [chineseConstellations, setChineseConstellations] = useState([]);
   const [boundaries, setBoundaries] = useState({});
   const [constellationLineArt, setConstellationLineArt] = useState({});
@@ -1799,7 +1818,7 @@ function App() {
   const [southRotation, setSouthRotation] = useState(0); // rotation in degrees
 
   // --- Layer Toggles ---
-  const [showWesternLines, setShowWesternLines] = useState(true);
+  const [westernLineStyle, setWesternLineStyle] = useState(DEFAULT_WESTERN_LINE_STYLE);
   const [showWesternBoundaries, setShowWesternBoundaries] = useState(true);
   const [showWesternBoundaryFills, setShowWesternBoundaryFills] = useState(false);
   const [showWesternNames, setShowWesternNames] = useState(true);
@@ -1833,7 +1852,11 @@ function App() {
   const renderOverlapDec = renderSettings.overlapDec;
   const renderNorthRotation = renderSettings.northRotation;
   const renderSouthRotation = renderSettings.southRotation;
-  const renderShowWesternLines = renderSettings.showWesternLines;
+  const legacyWesternLineStyle = renderSettings.showWesternLines === false
+    ? WESTERN_LINE_STYLE_OFF
+    : DEFAULT_WESTERN_LINE_STYLE;
+  const renderWesternLineStyle = normalizeWesternLineStyle(renderSettings.westernLineStyle ?? legacyWesternLineStyle);
+  const renderShowWesternLines = renderWesternLineStyle !== WESTERN_LINE_STYLE_OFF;
   const renderShowWesternBoundaries = renderSettings.showWesternBoundaries;
   const renderShowWesternBoundaryFills = renderSettings.showWesternBoundaryFills;
   const renderShowWesternNames = renderSettings.showWesternNames;
@@ -1941,9 +1964,10 @@ function App() {
         setLoading(true);
         // Fetch JSON files compiled by ingest script
         const basePath = import.meta.env.BASE_URL || '/';
-        const [starsRes, westernRes, chineseRes, boundariesRes, lineArtRes] = await Promise.all([
+        const [starsRes, westernRes, westernStRes, chineseRes, boundariesRes, lineArtRes] = await Promise.all([
           fetch(`${basePath}data/stars.normalized.json`).then(r => r.json()),
           fetch(`${basePath}data/constellations.western.json`).then(r => r.json()),
+          fetch(`${basePath}data/constellations.western_st.json`).then(r => r.json()),
           fetch(`${basePath}data/constellations.chinese.json`).then(r => r.json()),
           fetch(`${basePath}data/boundaries.json`).then(r => r.json()),
           fetch(`${basePath}data/noirlab-lineart.json`)
@@ -1953,6 +1977,7 @@ function App() {
 
         setStars(starsRes);
         setWesternConstellations(westernRes);
+        setWesternStConstellations(westernStRes);
         setChineseConstellations(chineseRes);
         setBoundaries(boundariesRes);
         setConstellationLineArt(lineArtRes.constellations || {});
@@ -2013,7 +2038,7 @@ function App() {
   ), [selected3dConstellation, starsMap, modelSettings, constellationLineArt]);
 
   // --- Centroid Calculation for Constellations (Spherical Average) ---
-  const getConstellationCentroid = (edges) => {
+  const getConstellationCentroid = useCallback((edges) => {
     if (!edges || edges.length === 0) return null;
     let sumX = 0, sumY = 0, sumZ = 0;
     let count = 0;
@@ -2045,17 +2070,23 @@ function App() {
     if (ra < 0) ra += 360;
 
     return { ra, dec };
-  };
+  }, [starsMap]);
+
+  const renderWesternConstellations = useMemo(() => (
+    renderWesternLineStyle === WESTERN_LINE_STYLE_SKY_TELESCOPE
+      ? westernStConstellations
+      : westernConstellations
+  ), [renderWesternLineStyle, westernConstellations, westernStConstellations]);
 
   // --- Centroid Lookup for Constellations ---
   const westernCenters = useMemo(() => {
     const centers = {};
-    for (const con of westernConstellations) {
+    for (const con of renderWesternConstellations) {
       const center = getConstellationCentroid(con.edges);
       if (center) centers[con.abbr] = center;
     }
     return centers;
-  }, [westernConstellations, starsMap]);
+  }, [renderWesternConstellations, getConstellationCentroid]);
 
   const chineseCenters = useMemo(() => {
     const centers = {};
@@ -2064,7 +2095,7 @@ function App() {
       if (center) centers[asterism.id] = center;
     }
     return centers;
-  }, [chineseConstellations, starsMap]);
+  }, [chineseConstellations, getConstellationCentroid]);
 
   const boundarySegments = useMemo(() => buildBoundarySegments(boundaries), [boundaries]);
   const boundaryColorMap = useMemo(() => (
@@ -2074,7 +2105,7 @@ function App() {
   const constellationStarHips = useMemo(() => {
     const hips = new Set();
     if (renderShowWesternLines) {
-      for (const con of westernConstellations) {
+      for (const con of renderWesternConstellations) {
         for (const [hip1, hip2] of con.edges) {
           hips.add(hip1);
           hips.add(hip2);
@@ -2090,7 +2121,7 @@ function App() {
       }
     }
     return hips;
-  }, [westernConstellations, chineseConstellations, renderShowWesternLines, renderShowChineseLines]);
+  }, [renderWesternConstellations, chineseConstellations, renderShowWesternLines, renderShowChineseLines]);
 
   // --- Top Brightest Stars list for Poster Table ---
   const brightestStars = useMemo(() => {
@@ -2368,7 +2399,7 @@ function App() {
       settings: renderSettings,
       typography: activeTypography,
       stars,
-      westernConstellations,
+      westernConstellations: renderWesternConstellations,
       chineseConstellations,
       boundaries,
       boundarySegments,
@@ -2386,7 +2417,7 @@ function App() {
     renderSettings,
     activeTypography,
     stars,
-    westernConstellations,
+    renderWesternConstellations,
     chineseConstellations,
     boundaries,
     boundarySegments,
@@ -3340,7 +3371,7 @@ function App() {
 
     // Constellation labels
     if (renderShowWesternNames) {
-      for (const con of westernConstellations) {
+      for (const con of renderWesternConstellations) {
         const center = westernCenters[con.abbr];
         if (!center) continue;
         const inPrimaryHemisphere = isNorth ? center.dec >= 0 : center.dec < 0;
@@ -3621,7 +3652,7 @@ function App() {
           })}
 
           {/* Western Constellation Lines */}
-          {renderShowWesternLines && westernConstellations.map((con, idx) => {
+          {renderShowWesternLines && renderWesternConstellations.map((con, idx) => {
             return con.edges.map(([hip1, hip2], eIdx) => {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
@@ -4633,13 +4664,35 @@ function App() {
             <h3 className="control-group-title">{uiText.layerDisplay}</h3>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
-              <ToggleRow checked={showWesternLines} onChange={(checked) => schedulePosterUpdate(
-                () => setShowWesternLines(checked),
-                { showWesternLines: checked }
-              )}>
-                {uiText.constellationLines}
-              </ToggleRow>
+              <div className="control-subgroup-heading">
+                <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
+                <div
+                  className="segmented-control segmented-control-three constellation-line-style-toggle"
+                  role="group"
+                  aria-label={uiText.constellationLineSet}
+                >
+                  {WESTERN_LINE_STYLE_OPTIONS.map((style) => {
+                    const label = style === WESTERN_LINE_STYLE_OFF
+                      ? uiText.constellationLineStyleOff
+                      : style === WESTERN_LINE_STYLE_SKY_TELESCOPE
+                        ? uiText.constellationLineStyleSkyTelescope
+                        : uiText.constellationLineStyleModern;
+                    return (
+                      <button
+                        key={style}
+                        type="button"
+                        className={`segment-button ${westernLineStyle === style ? 'active' : ''}`}
+                        onClick={() => schedulePosterUpdate(
+                          () => setWesternLineStyle(style),
+                          { westernLineStyle: style }
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <ToggleRow checked={showWesternNames} onChange={(checked) => schedulePosterUpdate(
                 () => setShowWesternNames(checked),
                 { showWesternNames: checked }
