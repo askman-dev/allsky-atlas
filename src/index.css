@@ -83,6 +83,29 @@ body {
   margin-top: 4px;
 }
 
+.sidebar-page-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 12px;
+}
+
+.sidebar-page-links button {
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: 600 12px var(--font-ui);
+  cursor: pointer;
+}
+
+.sidebar-page-links button:hover,
+.sidebar-page-links button.active {
+  color: var(--color-primary);
+  border-bottom-color: currentColor;
+}
+
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
@@ -148,6 +171,13 @@ body {
   font-weight: 700;
   color: var(--color-text-muted);
   margin: 0;
+}
+
+.control-subgroup-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 /* Form inputs */
@@ -379,6 +409,49 @@ body {
   background: rgba(0, 0, 0, 0.22);
 }
 
+.segmented-control-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.constellation-line-style-toggle {
+  width: 148px;
+  flex: 0 0 148px;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.constellation-line-style-toggle .segment-button {
+  min-height: 24px;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.inline-toggle-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.inline-toggle-field label {
+  display: block;
+}
+
+.segmented-control-compact {
+  width: 76px;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.segmented-control-compact .segment-button {
+  min-height: 22px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
 .segment-button {
   min-height: 30px;
   border: 0;
@@ -579,6 +652,194 @@ input:checked + .slider-switch:before {
   cursor: grabbing;
 }
 
+.constellation-3d-area {
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 28px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(9, 9, 11, 0.72), rgba(22, 22, 28, 0.86)),
+    radial-gradient(circle at 52% 42%, #222026 0%, #0c0c12 58%, #08080c 100%);
+  position: relative;
+}
+
+.constellation-3d-workbench {
+  width: min(860px, 100%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 18px;
+}
+
+.constellation-3d-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 18px;
+}
+
+.constellation-3d-heading p {
+  color: var(--color-primary);
+  font: 700 12px var(--font-title);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.constellation-3d-heading h2 {
+  margin-top: 4px;
+  color: var(--color-text-main);
+  font: 700 30px var(--font-title);
+  letter-spacing: 0;
+}
+
+.constellation-3d-heading span {
+  color: rgba(244, 244, 245, 0.18);
+  font: 700 54px var(--font-title);
+  line-height: 0.9;
+}
+
+.constellation-3d-preview {
+  height: min(68vh, 660px);
+  min-height: 360px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 24px);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+  cursor: grab;
+  perspective: 900px;
+  touch-action: none;
+  user-select: none;
+}
+
+.constellation-3d-preview:active {
+  cursor: grabbing;
+}
+
+.constellation-3d-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.constellation-3d-canvas canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.constellation-3d-camera,
+.constellation-3d-model {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 50%;
+  transform-style: preserve-3d;
+  transition: transform 80ms ease-out;
+  will-change: transform;
+}
+
+.constellation-3d-model svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  transform: translateZ(0);
+  pointer-events: none;
+}
+
+.model-outline {
+  fill: #eee7d6;
+  stroke: none;
+  stroke-linejoin: round;
+  filter:
+    drop-shadow(0 2px 0 rgba(255, 255, 255, 0.26))
+    drop-shadow(0 20px 26px rgba(0, 0, 0, 0.42));
+}
+
+.model-ridge {
+  stroke: #171717;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+}
+
+.model-detail-line {
+  fill: none;
+  stroke: #171717;
+  stroke-width: 2.15;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.model-line-art .model-detail-line {
+  vector-effect: non-scaling-stroke;
+}
+
+.model-star-well {
+  fill: #151515;
+  stroke: #151515;
+  stroke-width: 0.85;
+}
+
+.model-star-core {
+  fill: #d9ff83;
+  opacity: 0.92;
+}
+
+.constellation-3d-specs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.constellation-3d-specs span {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text-main);
+  font: 700 12px var(--font-ui);
+  text-align: center;
+}
+
+.constellation-3d-material-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--color-text-muted);
+  font: 700 11px var(--font-ui);
+}
+
+.constellation-3d-material-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.constellation-3d-material-legend i {
+  width: 18px;
+  height: 9px;
+  border-radius: 999px;
+  display: inline-block;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.material-color-plane {
+  background: #eee7d6;
+}
+
+.material-color-outline {
+  background: #171717;
+}
+
 .preview-toolbar {
   position: absolute;
   top: 18px;
@@ -593,6 +854,41 @@ input:checked + .slider-switch:before {
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(12px);
   cursor: default;
+}
+
+@media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-container {
+    min-height: 100vh;
+    height: auto;
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    height: auto;
+    max-height: none;
+  }
+
+  .constellation-3d-area {
+    height: auto;
+    min-height: 620px;
+  }
+
+  .constellation-3d-heading h2 {
+    font-size: 24px;
+  }
+
+  .constellation-3d-heading span {
+    font-size: 38px;
+  }
+
+  .constellation-3d-specs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .preview-tool-button {

@@ -112,6 +112,7 @@ function computeSphere({
       latitudeDeg: settings.observerLatitude,
       longitudeDeg: settings.observerLongitude,
       timestampMs: settings.observerTimestampMs,
+      timeWindowHours: settings.showVisibleSkyTimeWindow ? 6 : 0,
     })
     : null;
 
@@ -282,7 +283,11 @@ function computeSphere({
     )).filter(Boolean)
     : [];
 
-  const westernLines = settings.showWesternLines
+  const showWesternLines = settings.westernLineStyle
+    ? settings.westernLineStyle !== 'off'
+    : settings.showWesternLines !== false;
+
+  const westernLines = showWesternLines
     ? westernConstellations.flatMap((con, conIndex) => (
       con.edges.map(([hip1, hip2], edgeIndex) => {
         const s1 = starsMap.get(hip1);

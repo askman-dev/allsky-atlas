@@ -1,4 +1,7 @@
-import { useState, useEffect, useMemo, useRef, useTransition } from 'react';
+import { useState, useEffect, useMemo, useRef, useTransition, useCallback } from 'react';
+import * as THREE from 'three';
+import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import {
   projectNorth,
   projectSouth,
@@ -44,6 +47,111 @@ const CONSTELLATION_FILL_PALETTE = [
   '#66c2a5',
   '#e78ac3',
 ];
+const APP_PAGES = new Set(['poster', 'constellation-3d']);
+const WESTERN_LINE_STYLE_OFF = 'off';
+const WESTERN_LINE_STYLE_MODERN = 'modern';
+const WESTERN_LINE_STYLE_SKY_TELESCOPE = 'sky_telescope';
+const WESTERN_LINE_STYLE_OPTIONS = [
+  WESTERN_LINE_STYLE_OFF,
+  WESTERN_LINE_STYLE_MODERN,
+  WESTERN_LINE_STYLE_SKY_TELESCOPE,
+];
+const DEFAULT_WESTERN_LINE_STYLE = WESTERN_LINE_STYLE_MODERN;
+const normalizeWesternLineStyle = (style) => (
+  WESTERN_LINE_STYLE_OPTIONS.includes(style) ? style : DEFAULT_WESTERN_LINE_STYLE
+);
+const DEFAULT_3D_MODEL_SETTINGS = {
+  constellationAbbr: 'ORI',
+  cardWidthMm: 120,
+  baseThicknessMm: 2.4,
+  reliefHeightMm: 1.4,
+  showMythLines: false,
+  showStarConnectionLines: true,
+  surfaceLineWidthMm: 1,
+  grooveDiameterMm: 4.8,
+  grooveDepthMm: 1.2,
+  starPositionMode: 'recessed',
+  outlinePaddingMm: 11,
+};
+const SURFACE_LINE_HEIGHT_MM = 1;
+const clampModelScale = (scale) => Math.min(2.8, Math.max(0.45, scale));
+const degToRad = (degrees) => degrees * Math.PI / 180;
+const MIN_CARD_VIEW_ANGLE_DEG = 30;
+const MIN_CARD_VIEW_PITCH_DEG = -(90 - MIN_CARD_VIEW_ANGLE_DEG);
+const MAX_CARD_VIEW_PITCH_DEG = 0;
+const multiplyMatrix4 = (a, b) => {
+  const output = new Array(16).fill(0);
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < 4; col++) {
+      for (let k = 0; k < 4; k++) {
+        output[row * 4 + col] += a[row * 4 + k] * b[k * 4 + col];
+      }
+    }
+  }
+  return output;
+};
+
+const rotationXMatrix = (degrees) => {
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return [
+    1, 0, 0, 0,
+    0, cos, -sin, 0,
+    0, sin, cos, 0,
+    0, 0, 0, 1,
+  ];
+};
+
+const rotationYMatrix = (degrees) => {
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return [
+    cos, 0, sin, 0,
+    0, 1, 0, 0,
+    -sin, 0, cos, 0,
+    0, 0, 0, 1,
+  ];
+};
+
+const rotationZMatrix = (degrees) => {
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return [
+    cos, -sin, 0, 0,
+    sin, cos, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+};
+
+const getCardViewPitchDegrees = (matrix) => Math.atan2(matrix[9], matrix[10]) * 180 / Math.PI;
+
+const applyLimitedViewPitch = (matrix, pitchDegrees) => {
+  const currentPitch = getCardViewPitchDegrees(matrix);
+  const nextPitch = Math.min(
+    MAX_CARD_VIEW_PITCH_DEG,
+    Math.max(MIN_CARD_VIEW_PITCH_DEG, currentPitch + pitchDegrees),
+  );
+  return rotationXMatrix(nextPitch);
+};
+
+const matrixToCssMatrix3d = (matrix) => (
+  `matrix3d(${[
+    matrix[0], matrix[4], matrix[8], matrix[12],
+    matrix[1], matrix[5], matrix[9], matrix[13],
+    matrix[2], matrix[6], matrix[10], matrix[14],
+    matrix[3], matrix[7], matrix[11], matrix[15],
+  ].map((value) => Number(value.toFixed(6))).join(', ')})`
+);
+
+const DEFAULT_3D_VIEW = {
+  viewMatrix: rotationXMatrix(-38),
+  modelMatrix: rotationZMatrix(0),
+  scale: 1,
+};
 const CSS_PX_PER_MM = 96 / 25.4;
 const CITY_OBSERVERS = [
   { id: 'beijing', label: 'Beijing', labelZh: '北京', latitude: 39.9, longitude: 116.4 },
@@ -78,7 +186,7 @@ const DEFAULT_RENDER_SETTINGS = {
   overlapDec: 20,
   northRotation: 0,
   southRotation: 0,
-  showWesternLines: true,
+  westernLineStyle: DEFAULT_WESTERN_LINE_STYLE,
   showWesternBoundaries: true,
   showWesternBoundaryFills: false,
   showWesternNames: true,
@@ -89,6 +197,7 @@ const DEFAULT_RENDER_SETTINGS = {
   showEcliptic: false,
   showMilkyWay: true,
   showVisibleSky: true,
+  showVisibleSkyTimeWindow: false,
   observerLatitude: DEFAULT_OBSERVER.latitude,
   observerLongitude: DEFAULT_OBSERVER.longitude,
   observerMonth: initialDateParts.month,
@@ -105,7 +214,605 @@ const getInitialLanguageMode = () => {
   return LANGUAGE_MODES.has(mode) ? mode : 'en';
 };
 
+const getInitialPage = () => {
+  if (typeof window === 'undefined') return 'poster';
+  const page = new URLSearchParams(window.location.search).get('page');
+  return APP_PAGES.has(page) ? page : 'poster';
+};
+
 const getDisplayLanguage = (mode) => mode === 'zh' ? 'zh' : 'en';
+
+const getConstellationStarHipsFromEdges = (edges = []) => (
+  [...new Set(edges.flat())]
+);
+
+const projectWesternConstellationGraph = (constellation, starsMap, contentWidth) => {
+  const hips = getConstellationStarHipsFromEdges(constellation?.edges);
+  const sourceStars = hips.map((hip) => starsMap.get(hip)).filter(Boolean);
+  if (sourceStars.length === 0) return null;
+
+  const sinRa = sourceStars.reduce((sum, star) => sum + Math.sin(star.ra * Math.PI / 180), 0);
+  const cosRa = sourceStars.reduce((sum, star) => sum + Math.cos(star.ra * Math.PI / 180), 0);
+  const centerRa = (Math.atan2(sinRa, cosRa) * 180 / Math.PI + 360) % 360;
+  const centerDec = sourceStars.reduce((sum, star) => sum + star.dec, 0) / sourceStars.length;
+  const decScale = Math.cos(centerDec * Math.PI / 180);
+  const rawPoints = sourceStars.map((star) => {
+    let deltaRa = star.ra - centerRa;
+    if (deltaRa > 180) deltaRa -= 360;
+    if (deltaRa < -180) deltaRa += 360;
+    return {
+      hip: star.hip,
+      x: deltaRa * decScale,
+      y: -(star.dec - centerDec),
+      mag: star.mag,
+      nameEn: star.nameEn,
+      nameZh: star.nameZh,
+    };
+  });
+
+  const minX = Math.min(...rawPoints.map((point) => point.x));
+  const maxX = Math.max(...rawPoints.map((point) => point.x));
+  const minY = Math.min(...rawPoints.map((point) => point.y));
+  const maxY = Math.max(...rawPoints.map((point) => point.y));
+  const rawWidth = Math.max(0.1, maxX - minX);
+  const rawHeight = Math.max(0.1, maxY - minY);
+  const scale = contentWidth / Math.max(rawWidth, rawHeight);
+  const offsetX = -((minX + maxX) / 2) * scale;
+  const offsetY = -((minY + maxY) / 2) * scale;
+  const points = rawPoints.map((point) => ({
+    ...point,
+    x: point.x * scale + offsetX,
+    y: point.y * scale + offsetY,
+  }));
+  const pointsByHip = new Map(points.map((point) => [point.hip, point]));
+  const edges = (constellation.edges || [])
+    .map(([fromHip, toHip]) => {
+      const from = pointsByHip.get(fromHip);
+      const to = pointsByHip.get(toHip);
+      return from && to ? { from, to, source: 'western-poster-data' } : null;
+    })
+    .filter(Boolean);
+
+  return { points, edges };
+};
+
+const SILHOUETTE_GROUP_BY_ABBR = {
+  ORI: 'hunter',
+  HER: 'warrior',
+  PER: 'warrior',
+  CEP: 'robed_person',
+  CAS: 'robed_person',
+  AND: 'robed_person',
+  VIR: 'robed_person',
+  IND: 'robed_person',
+  AQR: 'water_bearer',
+  GEM: 'twins',
+  OPH: 'serpent_bearer',
+  BOO: 'herdsman',
+  AUR: 'charioteer',
+  SGR: 'centaur_archer',
+  CEN: 'centaur',
+  PEG: 'winged_horse',
+  EQU: 'horse',
+  LEO: 'lion',
+  LMI: 'lion',
+  UMA: 'bear',
+  UMI: 'bear',
+  CMa: 'dog',
+  CMA: 'dog',
+  CMI: 'dog',
+  CVN: 'dog',
+  LUP: 'wolf',
+  TAU: 'bull',
+  ARI: 'ram',
+  CAP: 'goat_fish',
+  SCO: 'scorpion',
+  CNC: 'crab',
+  PSC: 'fish',
+  PSA: 'fish',
+  CET: 'sea_monster',
+  HYA: 'serpent',
+  HYI: 'serpent',
+  SER: 'serpent',
+  DRA: 'dragon',
+  ERI: 'serpent',
+  LAC: 'dragon',
+  CYG: 'swan',
+  AQL: 'eagle',
+  ARA: 'altar',
+  COL: 'dove',
+  CRV: 'bird',
+  CRU: 'cross',
+  GRU: 'crane',
+  PAV: 'peacock',
+  PHE: 'phoenix',
+  APS: 'bird',
+  TUC: 'bird',
+  MUS: 'bird',
+  VOL: 'fish',
+  DOR: 'fish',
+  DEL: 'dolphin',
+  PUP: 'ship',
+  CAR: 'ship',
+  VEL: 'ship',
+  PYX: 'instrument',
+  SCL: 'instrument',
+  CAE: 'instrument',
+  CIR: 'instrument',
+  FOR: 'instrument',
+  HOR: 'instrument',
+  ANT: 'instrument',
+  MIC: 'instrument',
+  OCT: 'instrument',
+  PIC: 'instrument',
+  RET: 'instrument',
+  SEX: 'instrument',
+  TEL: 'instrument',
+  NOR: 'instrument',
+  MEN: 'instrument',
+  LYR: 'lyre',
+  CRA: 'crown',
+  CRB: 'crown',
+  COM: 'crown',
+  TRI: 'triangle',
+  TRA: 'triangle',
+  SGE: 'arrow',
+  SCT: 'shield',
+  CRT: 'cup',
+  LIB: 'scales',
+  CAM: 'horse',
+  MON: 'horse',
+  LEP: 'ram',
+  LYN: 'lion',
+  VUL: 'wolf',
+};
+
+const LINE_ART_STAR_OVERRIDES = {
+  LIB: [
+    { hip: 76333, nameEn: 'Zubenelhakrabi', nameZh: '氐宿三' },
+    { hip: 74785, nameEn: 'Zubeneschamali', nameZh: '氐宿四' },
+    { hip: 77853, nameEn: 'Theta Librae', nameZh: '西咸三' },
+    { hip: 73714, nameEn: 'Brachium', nameZh: '折威七' },
+    { hip: 72622, nameEn: 'Zubenelgenubi II', nameZh: '氐宿一' },
+    { hip: 72603, nameEn: 'Zubenelgenubi I', nameZh: '氐宿增七' },
+  ],
+};
+
+const SILHOUETTE_DETAIL_LINES = {
+  hunter: [
+    [{ x: 0.02, y: -0.31 }, { x: 0.08, y: -0.38 }, { x: 0.17, y: -0.37 }, { x: 0.24, y: -0.30 }, { x: 0.22, y: -0.23 }],
+    [{ x: -0.01, y: -0.20 }, { x: 0.10, y: -0.13 }, { x: 0.15, y: 0.02 }, { x: 0.10, y: 0.16 }],
+    [{ x: -0.15, y: 0.04 }, { x: 0.10, y: -0.01 }, { x: 0.22, y: -0.09 }],
+    [{ x: -0.13, y: 0.09 }, { x: 0.09, y: 0.05 }, { x: 0.23, y: 0.00 }],
+    [{ x: -0.05, y: 0.10 }, { x: -0.05, y: 0.32 }, { x: -0.02, y: 0.42 }],
+    [{ x: -0.05, y: 0.32 }, { x: 0.10, y: 0.28 }, { x: 0.15, y: 0.43 }],
+    [{ x: 0.30, y: -0.29 }, { x: 0.47, y: -0.35 }, { x: 0.62, y: -0.24 }, { x: 0.67, y: -0.06 }],
+    [{ x: 0.46, y: -0.12 }, { x: 0.57, y: 0.10 }, { x: 0.51, y: 0.31 }, { x: 0.35, y: 0.43 }],
+    [{ x: 0.32, y: -0.02 }, { x: 0.43, y: 0.22 }, { x: 0.28, y: 0.40 }],
+  ],
+};
+
+const SILHOUETTE_TEMPLATES = {
+  hunter: [
+    { x: -0.43, y: -0.61 }, { x: -0.34, y: -0.66 }, { x: -0.24, y: -0.63 }, { x: -0.17, y: -0.56 },
+    { x: -0.18, y: -0.47 }, { x: -0.29, y: -0.34 }, { x: -0.40, y: -0.22 }, { x: -0.49, y: -0.12 },
+    { x: -0.55, y: -0.13 }, { x: -0.53, y: -0.22 }, { x: -0.42, y: -0.43 }, { x: -0.32, y: -0.54 },
+    { x: -0.26, y: -0.38 }, { x: -0.22, y: -0.22 }, { x: -0.16, y: -0.10 }, { x: -0.06, y: -0.04 },
+    { x: 0.04, y: -0.09 }, { x: 0.00, y: -0.24 }, { x: 0.04, y: -0.32 }, { x: 0.12, y: -0.36 },
+    { x: 0.20, y: -0.34 }, { x: 0.25, y: -0.28 }, { x: 0.36, y: -0.40 }, { x: 0.52, y: -0.38 },
+    { x: 0.64, y: -0.29 }, { x: 0.70, y: -0.15 }, { x: 0.67, y: 0.03 }, { x: 0.58, y: 0.20 },
+    { x: 0.46, y: 0.34 }, { x: 0.32, y: 0.43 }, { x: 0.22, y: 0.48 }, { x: 0.24, y: 0.61 },
+    { x: 0.15, y: 0.65 }, { x: 0.04, y: 0.63 }, { x: 0.00, y: 0.50 }, { x: -0.04, y: 0.29 },
+    { x: -0.10, y: 0.52 }, { x: -0.22, y: 0.70 }, { x: -0.34, y: 0.77 }, { x: -0.43, y: 0.74 },
+    { x: -0.39, y: 0.62 }, { x: -0.28, y: 0.52 }, { x: -0.23, y: 0.36 }, { x: -0.16, y: 0.16 },
+    { x: -0.21, y: 0.02 }, { x: -0.26, y: -0.13 }, { x: -0.36, y: -0.28 }, { x: -0.31, y: -0.42 },
+  ],
+  warrior: [
+    { x: -0.03, y: -0.54 }, { x: 0.10, y: -0.51 }, { x: 0.16, y: -0.41 }, { x: 0.12, y: -0.30 },
+    { x: 0.34, y: -0.36 }, { x: 0.50, y: -0.23 }, { x: 0.41, y: -0.07 }, { x: 0.18, y: -0.15 },
+    { x: 0.19, y: 0.08 }, { x: 0.38, y: 0.24 }, { x: 0.30, y: 0.41 }, { x: 0.08, y: 0.30 },
+    { x: 0.02, y: 0.52 }, { x: -0.14, y: 0.52 }, { x: -0.17, y: 0.25 }, { x: -0.38, y: 0.40 },
+    { x: -0.50, y: 0.26 }, { x: -0.24, y: 0.02 }, { x: -0.30, y: -0.19 }, { x: -0.50, y: -0.30 },
+    { x: -0.38, y: -0.44 }, { x: -0.15, y: -0.32 },
+  ],
+  robed_person: [
+    { x: -0.06, y: -0.55 }, { x: 0.08, y: -0.55 }, { x: 0.16, y: -0.45 }, { x: 0.14, y: -0.34 },
+    { x: 0.36, y: -0.25 }, { x: 0.46, y: -0.08 }, { x: 0.30, y: 0.02 }, { x: 0.22, y: -0.06 },
+    { x: 0.34, y: 0.47 }, { x: 0.06, y: 0.56 }, { x: -0.28, y: 0.48 }, { x: -0.16, y: -0.05 },
+    { x: -0.36, y: 0.05 }, { x: -0.48, y: -0.10 }, { x: -0.34, y: -0.27 }, { x: -0.12, y: -0.35 },
+  ],
+  water_bearer: [
+    { x: -0.07, y: -0.54 }, { x: 0.07, y: -0.54 }, { x: 0.15, y: -0.43 }, { x: 0.12, y: -0.32 },
+    { x: 0.38, y: -0.30 }, { x: 0.55, y: -0.15 }, { x: 0.44, y: 0.00 }, { x: 0.20, y: -0.11 },
+    { x: 0.16, y: 0.15 }, { x: 0.24, y: 0.50 }, { x: 0.05, y: 0.54 }, { x: -0.03, y: 0.22 },
+    { x: -0.16, y: 0.53 }, { x: -0.34, y: 0.48 }, { x: -0.22, y: 0.08 }, { x: -0.45, y: -0.01 },
+    { x: -0.54, y: -0.20 }, { x: -0.34, y: -0.30 }, { x: -0.14, y: -0.33 },
+  ],
+  twins: [
+    { x: -0.28, y: -0.54 }, { x: -0.16, y: -0.54 }, { x: -0.10, y: -0.43 }, { x: -0.16, y: -0.30 },
+    { x: -0.03, y: -0.22 }, { x: 0.08, y: -0.32 }, { x: 0.15, y: -0.48 }, { x: 0.28, y: -0.50 },
+    { x: 0.36, y: -0.38 }, { x: 0.31, y: -0.26 }, { x: 0.48, y: -0.12 }, { x: 0.38, y: 0.05 },
+    { x: 0.24, y: -0.06 }, { x: 0.28, y: 0.48 }, { x: 0.09, y: 0.52 }, { x: 0.02, y: 0.10 },
+    { x: -0.08, y: 0.52 }, { x: -0.28, y: 0.50 }, { x: -0.22, y: -0.05 }, { x: -0.40, y: 0.04 },
+    { x: -0.50, y: -0.14 }, { x: -0.32, y: -0.28 },
+  ],
+  centaur_archer: [
+    { x: -0.55, y: -0.08 }, { x: -0.30, y: -0.24 }, { x: -0.12, y: -0.42 }, { x: 0.03, y: -0.52 },
+    { x: 0.15, y: -0.45 }, { x: 0.07, y: -0.28 }, { x: 0.26, y: -0.20 }, { x: 0.56, y: -0.42 },
+    { x: 0.45, y: -0.08 }, { x: 0.24, y: -0.01 }, { x: 0.14, y: 0.18 }, { x: 0.36, y: 0.42 },
+    { x: 0.10, y: 0.34 }, { x: -0.12, y: 0.14 }, { x: -0.20, y: 0.46 }, { x: -0.42, y: 0.45 },
+    { x: -0.36, y: 0.12 }, { x: -0.55, y: 0.08 },
+  ],
+  centaur: [
+    { x: -0.55, y: -0.06 }, { x: -0.28, y: -0.24 }, { x: -0.08, y: -0.45 }, { x: 0.08, y: -0.50 },
+    { x: 0.16, y: -0.36 }, { x: 0.09, y: -0.20 }, { x: 0.36, y: -0.12 }, { x: 0.54, y: 0.02 },
+    { x: 0.40, y: 0.18 }, { x: 0.16, y: 0.15 }, { x: 0.18, y: 0.48 }, { x: -0.04, y: 0.48 },
+    { x: -0.12, y: 0.18 }, { x: -0.31, y: 0.45 }, { x: -0.50, y: 0.37 }, { x: -0.40, y: 0.10 },
+  ],
+  winged_horse: [
+    { x: -0.56, y: -0.02 }, { x: -0.34, y: -0.22 }, { x: -0.10, y: -0.24 }, { x: 0.04, y: -0.50 },
+    { x: 0.20, y: -0.18 }, { x: 0.46, y: -0.26 }, { x: 0.56, y: -0.10 }, { x: 0.40, y: 0.02 },
+    { x: 0.30, y: 0.26 }, { x: 0.10, y: 0.22 }, { x: 0.06, y: 0.52 }, { x: -0.14, y: 0.50 },
+    { x: -0.20, y: 0.20 }, { x: -0.42, y: 0.36 }, { x: -0.54, y: 0.18 },
+  ],
+  horse: [
+    { x: -0.54, y: 0.06 }, { x: -0.34, y: -0.16 }, { x: -0.05, y: -0.20 }, { x: 0.24, y: -0.12 },
+    { x: 0.52, y: -0.24 }, { x: 0.56, y: -0.06 }, { x: 0.36, y: 0.04 }, { x: 0.26, y: 0.30 },
+    { x: 0.08, y: 0.30 }, { x: -0.02, y: 0.06 }, { x: -0.25, y: 0.34 }, { x: -0.46, y: 0.26 },
+  ],
+  lion: [
+    { x: -0.54, y: 0.02 }, { x: -0.34, y: -0.18 }, { x: -0.10, y: -0.22 }, { x: 0.02, y: -0.42 },
+    { x: 0.22, y: -0.32 }, { x: 0.18, y: -0.16 }, { x: 0.48, y: -0.12 }, { x: 0.56, y: 0.05 },
+    { x: 0.38, y: 0.16 }, { x: 0.16, y: 0.12 }, { x: 0.18, y: 0.45 }, { x: -0.02, y: 0.45 },
+    { x: -0.10, y: 0.15 }, { x: -0.34, y: 0.36 }, { x: -0.50, y: 0.26 },
+  ],
+  bear: [
+    { x: -0.54, y: -0.06 }, { x: -0.36, y: -0.25 }, { x: -0.10, y: -0.24 }, { x: 0.18, y: -0.16 },
+    { x: 0.38, y: -0.26 }, { x: 0.55, y: -0.10 }, { x: 0.42, y: 0.04 }, { x: 0.26, y: 0.02 },
+    { x: 0.24, y: 0.36 }, { x: 0.02, y: 0.40 }, { x: -0.05, y: 0.11 }, { x: -0.30, y: 0.37 },
+    { x: -0.50, y: 0.28 }, { x: -0.38, y: 0.03 },
+  ],
+  dog: [
+    { x: -0.54, y: 0.00 }, { x: -0.34, y: -0.20 }, { x: -0.08, y: -0.18 }, { x: 0.18, y: -0.10 },
+    { x: 0.42, y: -0.24 }, { x: 0.56, y: -0.08 }, { x: 0.42, y: 0.04 }, { x: 0.28, y: 0.00 },
+    { x: 0.24, y: 0.40 }, { x: 0.04, y: 0.42 }, { x: -0.04, y: 0.12 }, { x: -0.28, y: 0.38 },
+    { x: -0.46, y: 0.30 }, { x: -0.34, y: 0.05 },
+  ],
+  wolf: [
+    { x: -0.55, y: 0.04 }, { x: -0.34, y: -0.20 }, { x: -0.08, y: -0.22 }, { x: 0.22, y: -0.12 },
+    { x: 0.48, y: -0.28 }, { x: 0.58, y: -0.08 }, { x: 0.42, y: 0.02 }, { x: 0.24, y: 0.02 },
+    { x: 0.22, y: 0.44 }, { x: 0.02, y: 0.44 }, { x: -0.06, y: 0.12 }, { x: -0.35, y: 0.36 },
+    { x: -0.52, y: 0.26 },
+  ],
+  bull: [
+    { x: -0.55, y: -0.02 }, { x: -0.38, y: -0.28 }, { x: -0.12, y: -0.20 }, { x: 0.14, y: -0.18 },
+    { x: 0.36, y: -0.36 }, { x: 0.52, y: -0.26 }, { x: 0.38, y: -0.08 }, { x: 0.56, y: 0.05 },
+    { x: 0.38, y: 0.20 }, { x: 0.10, y: 0.10 }, { x: 0.04, y: 0.48 }, { x: -0.16, y: 0.48 },
+    { x: -0.22, y: 0.12 }, { x: -0.46, y: 0.26 },
+  ],
+  ram: [
+    { x: -0.52, y: -0.02 }, { x: -0.34, y: -0.25 }, { x: -0.10, y: -0.18 }, { x: 0.15, y: -0.18 },
+    { x: 0.36, y: -0.34 }, { x: 0.53, y: -0.18 }, { x: 0.42, y: 0.02 }, { x: 0.24, y: 0.04 },
+    { x: 0.20, y: 0.42 }, { x: 0.02, y: 0.44 }, { x: -0.08, y: 0.10 }, { x: -0.34, y: 0.30 },
+    { x: -0.50, y: 0.20 },
+  ],
+  goat_fish: [
+    { x: -0.54, y: -0.12 }, { x: -0.30, y: -0.32 }, { x: -0.08, y: -0.22 }, { x: 0.12, y: -0.34 },
+    { x: 0.32, y: -0.20 }, { x: 0.18, y: 0.02 }, { x: 0.52, y: 0.16 }, { x: 0.28, y: 0.28 },
+    { x: 0.52, y: 0.43 }, { x: 0.05, y: 0.36 }, { x: -0.18, y: 0.16 }, { x: -0.42, y: 0.14 },
+  ],
+  scorpion: [
+    { x: -0.56, y: -0.18 }, { x: -0.34, y: -0.30 }, { x: -0.14, y: -0.20 }, { x: 0.04, y: -0.26 },
+    { x: 0.24, y: -0.14 }, { x: 0.48, y: -0.28 }, { x: 0.56, y: -0.08 }, { x: 0.38, y: 0.02 },
+    { x: 0.20, y: 0.00 }, { x: 0.10, y: 0.16 }, { x: 0.22, y: 0.32 }, { x: 0.10, y: 0.50 },
+    { x: -0.04, y: 0.32 }, { x: -0.20, y: 0.22 }, { x: -0.42, y: 0.28 }, { x: -0.54, y: 0.08 },
+  ],
+  crab: [
+    { x: -0.50, y: -0.18 }, { x: -0.30, y: -0.36 }, { x: -0.12, y: -0.22 }, { x: 0.12, y: -0.22 },
+    { x: 0.32, y: -0.38 }, { x: 0.52, y: -0.18 }, { x: 0.35, y: -0.02 }, { x: 0.50, y: 0.20 },
+    { x: 0.22, y: 0.16 }, { x: 0.08, y: 0.34 }, { x: -0.08, y: 0.34 }, { x: -0.22, y: 0.16 },
+    { x: -0.50, y: 0.20 }, { x: -0.34, y: -0.02 },
+  ],
+  fish: [
+    { x: -0.56, y: 0.00 }, { x: -0.36, y: -0.24 }, { x: -0.08, y: -0.28 }, { x: 0.24, y: -0.18 },
+    { x: 0.54, y: -0.32 }, { x: 0.42, y: 0.00 }, { x: 0.54, y: 0.32 }, { x: 0.24, y: 0.18 },
+    { x: -0.08, y: 0.28 }, { x: -0.36, y: 0.24 },
+  ],
+  sea_monster: [
+    { x: -0.56, y: -0.05 }, { x: -0.32, y: -0.28 }, { x: -0.06, y: -0.22 }, { x: 0.20, y: -0.36 },
+    { x: 0.52, y: -0.16 }, { x: 0.38, y: 0.03 }, { x: 0.55, y: 0.25 }, { x: 0.20, y: 0.18 },
+    { x: -0.02, y: 0.36 }, { x: -0.28, y: 0.20 }, { x: -0.50, y: 0.16 },
+  ],
+  serpent: [
+    { x: -0.56, y: -0.10 }, { x: -0.30, y: -0.26 }, { x: -0.05, y: -0.10 }, { x: 0.18, y: -0.26 },
+    { x: 0.52, y: -0.12 }, { x: 0.38, y: 0.08 }, { x: 0.10, y: 0.02 }, { x: -0.08, y: 0.22 },
+    { x: -0.38, y: 0.28 }, { x: -0.52, y: 0.10 },
+  ],
+  dragon: [
+    { x: -0.54, y: -0.16 }, { x: -0.30, y: -0.34 }, { x: -0.08, y: -0.12 }, { x: 0.14, y: -0.30 },
+    { x: 0.44, y: -0.18 }, { x: 0.56, y: 0.02 }, { x: 0.34, y: 0.12 }, { x: 0.10, y: 0.02 },
+    { x: -0.08, y: 0.28 }, { x: -0.34, y: 0.36 }, { x: -0.52, y: 0.16 },
+  ],
+  swan: [
+    { x: -0.56, y: 0.02 }, { x: -0.25, y: -0.20 }, { x: -0.05, y: -0.50 }, { x: 0.10, y: -0.17 },
+    { x: 0.42, y: -0.36 }, { x: 0.26, y: -0.02 }, { x: 0.55, y: 0.15 }, { x: 0.12, y: 0.18 },
+    { x: -0.06, y: 0.50 }, { x: -0.23, y: 0.18 },
+  ],
+  eagle: [
+    { x: -0.56, y: -0.05 }, { x: -0.12, y: -0.34 }, { x: 0.03, y: -0.16 }, { x: 0.46, y: -0.34 },
+    { x: 0.30, y: -0.02 }, { x: 0.56, y: 0.16 }, { x: 0.16, y: 0.12 }, { x: 0.02, y: 0.46 },
+    { x: -0.14, y: 0.10 }, { x: -0.54, y: 0.18 },
+  ],
+  bird: [
+    { x: -0.56, y: -0.03 }, { x: -0.15, y: -0.28 }, { x: 0.02, y: -0.10 }, { x: 0.44, y: -0.26 },
+    { x: 0.26, y: 0.00 }, { x: 0.54, y: 0.14 }, { x: 0.12, y: 0.12 }, { x: -0.02, y: 0.42 },
+    { x: -0.18, y: 0.12 }, { x: -0.54, y: 0.16 },
+  ],
+  peacock: [
+    { x: -0.50, y: 0.20 }, { x: -0.34, y: -0.36 }, { x: -0.08, y: -0.50 }, { x: 0.22, y: -0.38 },
+    { x: 0.52, y: -0.04 }, { x: 0.30, y: 0.14 }, { x: 0.46, y: 0.44 }, { x: 0.05, y: 0.26 },
+    { x: -0.22, y: 0.44 },
+  ],
+  phoenix: [
+    { x: -0.56, y: 0.10 }, { x: -0.16, y: -0.40 }, { x: 0.02, y: -0.18 }, { x: 0.42, y: -0.46 },
+    { x: 0.28, y: -0.08 }, { x: 0.56, y: 0.10 }, { x: 0.18, y: 0.14 }, { x: 0.06, y: 0.52 },
+    { x: -0.14, y: 0.16 },
+  ],
+  dolphin: [
+    { x: -0.52, y: 0.08 }, { x: -0.30, y: -0.20 }, { x: 0.08, y: -0.28 }, { x: 0.42, y: -0.10 },
+    { x: 0.56, y: -0.28 }, { x: 0.48, y: 0.06 }, { x: 0.20, y: 0.24 }, { x: -0.10, y: 0.20 },
+    { x: -0.36, y: 0.32 },
+  ],
+  ship: [
+    { x: -0.56, y: -0.06 }, { x: -0.20, y: -0.22 }, { x: 0.10, y: -0.18 }, { x: 0.44, y: -0.02 },
+    { x: 0.54, y: 0.18 }, { x: 0.26, y: 0.36 }, { x: -0.24, y: 0.34 }, { x: -0.48, y: 0.16 },
+  ],
+  instrument: [
+    { x: -0.52, y: -0.12 }, { x: -0.22, y: -0.36 }, { x: 0.26, y: -0.34 }, { x: 0.52, y: -0.06 },
+    { x: 0.34, y: 0.28 }, { x: 0.02, y: 0.42 }, { x: -0.34, y: 0.28 },
+  ],
+  lyre: [
+    { x: -0.44, y: -0.38 }, { x: 0.44, y: -0.38 }, { x: 0.34, y: 0.26 }, { x: 0.12, y: 0.48 },
+    { x: -0.12, y: 0.48 }, { x: -0.34, y: 0.26 },
+  ],
+  crown: [
+    { x: -0.54, y: 0.18 }, { x: -0.36, y: -0.20 }, { x: -0.14, y: 0.06 }, { x: 0.00, y: -0.34 },
+    { x: 0.16, y: 0.06 }, { x: 0.38, y: -0.20 }, { x: 0.54, y: 0.18 }, { x: 0.28, y: 0.36 },
+    { x: -0.28, y: 0.36 },
+  ],
+  triangle: [
+    { x: 0.00, y: -0.52 }, { x: 0.52, y: 0.42 }, { x: -0.52, y: 0.42 },
+  ],
+  arrow: [
+    { x: -0.56, y: -0.06 }, { x: 0.18, y: -0.06 }, { x: 0.18, y: -0.22 }, { x: 0.56, y: 0.00 },
+    { x: 0.18, y: 0.22 }, { x: 0.18, y: 0.06 }, { x: -0.56, y: 0.06 },
+  ],
+  shield: [
+    { x: -0.44, y: -0.48 }, { x: 0.44, y: -0.48 }, { x: 0.50, y: 0.02 }, { x: 0.20, y: 0.48 },
+    { x: 0.00, y: 0.56 }, { x: -0.20, y: 0.48 }, { x: -0.50, y: 0.02 },
+  ],
+  cup: [
+    { x: -0.50, y: -0.42 }, { x: 0.50, y: -0.42 }, { x: 0.30, y: 0.18 }, { x: 0.08, y: 0.24 },
+    { x: 0.08, y: 0.44 }, { x: 0.34, y: 0.52 }, { x: -0.34, y: 0.52 }, { x: -0.08, y: 0.44 },
+    { x: -0.08, y: 0.24 }, { x: -0.30, y: 0.18 },
+  ],
+  scales: [
+    { x: -0.52, y: -0.22 }, { x: 0.52, y: -0.22 }, { x: 0.36, y: -0.02 }, { x: 0.52, y: 0.28 },
+    { x: 0.22, y: 0.28 }, { x: 0.00, y: 0.02 }, { x: -0.22, y: 0.28 }, { x: -0.52, y: 0.28 },
+    { x: -0.36, y: -0.02 },
+  ],
+  altar: [
+    { x: -0.40, y: -0.46 }, { x: 0.40, y: -0.46 }, { x: 0.28, y: -0.18 }, { x: 0.36, y: 0.48 },
+    { x: -0.36, y: 0.48 }, { x: -0.28, y: -0.18 },
+  ],
+  cross: [
+    { x: -0.13, y: -0.54 }, { x: 0.13, y: -0.54 }, { x: 0.13, y: -0.12 }, { x: 0.52, y: -0.12 },
+    { x: 0.52, y: 0.12 }, { x: 0.13, y: 0.12 }, { x: 0.13, y: 0.54 }, { x: -0.13, y: 0.54 },
+    { x: -0.13, y: 0.12 }, { x: -0.52, y: 0.12 }, { x: -0.52, y: -0.12 }, { x: -0.13, y: -0.12 },
+  ],
+};
+
+const DEFAULT_SILHOUETTE = [
+  { x: -0.42, y: -0.44 }, { x: 0.08, y: -0.52 }, { x: 0.46, y: -0.24 }, { x: 0.52, y: 0.10 },
+  { x: 0.24, y: 0.46 }, { x: -0.16, y: 0.52 }, { x: -0.50, y: 0.18 },
+];
+
+const getSilhouetteGroup = (constellation) => (
+  SILHOUETTE_GROUP_BY_ABBR[constellation?.abbr] || 'default'
+);
+
+const getSilhouetteTemplate = (constellation) => (
+  SILHOUETTE_TEMPLATES[getSilhouetteGroup(constellation)] || DEFAULT_SILHOUETTE
+);
+
+const getSilhouetteDetailLines = (constellation) => (
+  SILHOUETTE_DETAIL_LINES[getSilhouetteGroup(constellation)] || []
+);
+
+const getPolygonBounds = (points) => ({
+  minX: Math.min(...points.map((point) => point.x)),
+  maxX: Math.max(...points.map((point) => point.x)),
+  minY: Math.min(...points.map((point) => point.y)),
+  maxY: Math.max(...points.map((point) => point.y)),
+});
+
+const buildMythicSilhouette = (constellation, points, settings) => {
+  if (points.length < 2) {
+    return { outline: [
+      { x: -settings.cardWidthMm / 2, y: -settings.cardWidthMm / 5 },
+      { x: settings.cardWidthMm / 2, y: -settings.cardWidthMm / 5 },
+      { x: settings.cardWidthMm / 2, y: settings.cardWidthMm / 5 },
+      { x: -settings.cardWidthMm / 2, y: settings.cardWidthMm / 5 },
+    ], detailLines: [] };
+  }
+
+  const template = getSilhouetteTemplate(constellation);
+  const templateDetailLines = getSilhouetteDetailLines(constellation);
+  const templateBounds = getPolygonBounds(template);
+  const pointBounds = getPolygonBounds(points);
+  const pointWidth = Math.max(1, pointBounds.maxX - pointBounds.minX);
+  const pointHeight = Math.max(1, pointBounds.maxY - pointBounds.minY);
+  const targetWidth = pointWidth + settings.outlinePaddingMm * 2.6;
+  const targetHeight = pointHeight + settings.outlinePaddingMm * 2.6;
+  const templateWidth = Math.max(0.1, templateBounds.maxX - templateBounds.minX);
+  const templateHeight = Math.max(0.1, templateBounds.maxY - templateBounds.minY);
+  const cx = (pointBounds.minX + pointBounds.maxX) / 2;
+  const cy = (pointBounds.minY + pointBounds.maxY) / 2;
+  let scale = Math.max(targetWidth / templateWidth, targetHeight / templateHeight);
+
+  const createOutline = () => template.map((point) => ({
+    x: cx + point.x * scale,
+    y: cy + point.y * scale,
+  }));
+  const transformPoint = (point) => ({
+    x: cx + point.x * scale,
+    y: cy + point.y * scale,
+  });
+
+  let outline = createOutline();
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (points.every((point) => pointInPolygon(point, outline))) break;
+    scale *= 1.12;
+    outline = createOutline();
+  }
+
+  const detailLines = templateDetailLines.map((line) => line.map(transformPoint));
+  return { outline, detailLines };
+};
+
+const expandPolygonFromCenter = (polygon, padding) => polygon.map((point) => {
+  const length = Math.hypot(point.x, point.y) || 1;
+  return {
+    x: point.x + (point.x / length) * padding,
+    y: point.y + (point.y / length) * padding,
+  };
+});
+
+const getLineArtStarLabels = (constellation, starsMap, circleCount) => {
+  const override = LINE_ART_STAR_OVERRIDES[constellation.abbr] || [];
+  if (override.length > 0) return override;
+
+  return getConstellationStarHipsFromEdges(constellation.edges)
+    .map((hip) => starsMap.get(hip))
+    .filter(Boolean)
+    .sort((a, b) => a.mag - b.mag)
+    .slice(0, circleCount)
+    .map((star) => ({
+      hip: star.hip,
+      nameEn: star.nameEn || `HIP ${star.hip}`,
+      nameZh: star.nameZh || star.nameEn || `HIP ${star.hip}`,
+    }));
+};
+
+const buildLineArtConstellationModel = (constellation, lineArt, settings, starsMap = new Map()) => {
+  if (!constellation || !lineArt?.bounds) {
+    return null;
+  }
+
+  const rawWidth = Math.max(1, lineArt.bounds.maxX - lineArt.bounds.minX);
+  const rawHeight = Math.max(1, lineArt.bounds.maxY - lineArt.bounds.minY);
+  const contentWidth = Math.max(20, settings.cardWidthMm - settings.outlinePaddingMm * 2);
+  const scale = contentWidth / Math.max(rawWidth, rawHeight);
+  const rawCenterX = (lineArt.bounds.minX + lineArt.bounds.maxX) / 2;
+  const rawCenterY = (lineArt.bounds.minY + lineArt.bounds.maxY) / 2;
+  const offsetX = -rawCenterX * scale;
+  const offsetY = -rawCenterY * scale;
+  const transformPoint = (point) => ({
+    x: point.x * scale + offsetX,
+    y: point.y * scale + offsetY,
+  });
+
+  const hull = Array.isArray(lineArt.hull) ? lineArt.hull : [];
+  if (hull.length < 3) return null;
+
+  const outline = expandPolygonFromCenter(hull.map(transformPoint), settings.outlinePaddingMm);
+  const starLabels = getLineArtStarLabels(constellation, starsMap, lineArt.circles.length);
+  const points = lineArt.circles.map((circle, index) => ({
+    hip: starLabels[index]?.hip || `${constellation.abbr}-lineart-${index}`,
+    x: circle.x * scale + offsetX,
+    y: circle.y * scale + offsetY,
+    mag: Math.max(0, 5 - circle.r),
+    sourceRadius: circle.r * scale,
+    nameEn: starLabels[index]?.nameEn || `Star ${index + 1}`,
+    nameZh: starLabels[index]?.nameZh || `星 ${index + 1}`,
+  }));
+  const edges = [];
+  let edgeSource = 'none';
+
+  for (const polyline of lineArt.polylines || []) {
+    for (let index = 0; index < polyline.length - 1; index++) {
+      edges.push({
+        from: transformPoint(polyline[index]),
+        to: transformPoint(polyline[index + 1]),
+        source: 'noirlab-polyline',
+      });
+    }
+  }
+
+  for (const line of lineArt.lines || []) {
+    edges.push({
+      from: transformPoint({ x: line.x1, y: line.y1 }),
+      to: transformPoint({ x: line.x2, y: line.y2 }),
+      source: 'noirlab-line',
+    });
+  }
+
+  for (const polygon of lineArt.polygons || []) {
+    for (let index = 0; index < polygon.length; index++) {
+      edges.push({
+        from: transformPoint(polygon[index]),
+        to: transformPoint(polygon[(index + 1) % polygon.length]),
+        source: 'noirlab-polygon',
+      });
+    }
+  }
+
+  if (edges.length > 0) edgeSource = 'noirlab-svg';
+
+  return {
+    points,
+    edges,
+    edgeSource,
+    outline,
+    detailLines: [],
+    lineArt: {
+      ...lineArt,
+      offsetX,
+      offsetY,
+      scale,
+      transform: `translate(${offsetX.toFixed(4)} ${offsetY.toFixed(4)}) scale(${scale.toFixed(6)})`,
+    },
+    silhouetteGroup: 'noirlab',
+  };
+};
+
+const pointInPolygon = (point, polygon) => {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersects = ((yi > point.y) !== (yj > point.y)) &&
+      (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+};
+
+const projectConstellationModel = (constellation, starsMap, settings, lineArtMap = {}) => {
+  if (!constellation) return null;
+  const lineArtModel = buildLineArtConstellationModel(constellation, lineArtMap[constellation.abbr], settings, starsMap);
+  if (lineArtModel) return lineArtModel;
+
+  const contentWidth = Math.max(20, settings.cardWidthMm - settings.outlinePaddingMm * 2);
+  const westernGraph = projectWesternConstellationGraph(constellation, starsMap, contentWidth);
+  if (!westernGraph) return null;
+  const { points, edges } = westernGraph;
+  const { outline, detailLines } = buildMythicSilhouette(constellation, points, settings);
+
+  return { points, edges, edgeSource: 'western-poster-data', outline, detailLines, silhouetteGroup: getSilhouetteGroup(constellation) };
+};
 
 const POSTER_COPY_PRESETS = {
   en: {
@@ -121,6 +828,8 @@ const POSTER_COPY_PRESETS = {
 const UI_TEXT = {
   en: {
     appSubtitle: 'All-sky constellation poster generator',
+    posterPageLink: 'Star Map Poster',
+    constellation3dPageLink: '3D Printed Constellations',
     loading: 'Loading all-sky stars and constellation data...',
     loadingSubtext: 'First load may take a few seconds',
     loadError: 'Unable to load star map data. Please confirm the ingestion script has run.',
@@ -152,7 +861,10 @@ const UI_TEXT = {
     southRotation: 'South Map Rotation',
     layerDisplay: 'Star Map Layers',
     modernConstellations: 'Modern Constellations',
-    constellationLines: 'Constellation Lines',
+    constellationLineSet: 'Constellation Line Set',
+    constellationLineStyleOff: 'Off',
+    constellationLineStyleModern: 'Modern',
+    constellationLineStyleSkyTelescope: 'S&T',
     constellationNames: 'Constellation Names',
     iauBoundaries: 'IAU Constellation Boundaries',
     constellationRegionColors: 'Constellation Region Colors',
@@ -174,10 +886,12 @@ const UI_TEXT = {
     eclipticPath: 'Ecliptic Path',
     milkyWayBand: 'Milky Way Band',
     visibleSky: 'Naked-eye Visible Sky',
+    visibleSkyTimeWindow: 'Extend ±3 Hours',
     observerLatitude: 'Observer Latitude',
     observerHour: 'Local Hour',
     observerMonth: 'Month',
     observerCityHint: 'City dots set latitude and longitude',
+    observerHourHint: 'Default uses the selected hour only. Turn on ±3 hours to show a 6-hour visible-sky window.',
     exportSvg: 'Export Vector SVG',
     exportPng: 'Export Print PNG',
     exportTiledPdf: 'Export A4 Tiled PDF',
@@ -195,9 +909,35 @@ const UI_TEXT = {
     renderingPdf: 'Rendering tiled A4 PDF...',
     exportedPdf: 'Exported tiled A4 PDF.',
     exportPdfFailed: 'PDF export failed. Check the console log.',
+    print3dTitle: '3D Printed Constellations',
+    print3dSubtitle: 'Export constellation-shaped relief cards for glow-powder star wells.',
+    print3dConstellation: 'Constellation',
+    print3dCardWidth: 'Card Width',
+    print3dBaseThickness: 'Base Thickness',
+    print3dBaseGroup: 'Base',
+    print3dLayerGroup: 'Layers',
+    print3dStarGroup: 'Stars & Grooves',
+    print3dMythLines: 'Myth Story Lines',
+    print3dStarConnectionLines: 'Star Connection Grooves',
+    print3dReliefHeight: 'Raised Relief',
+    print3dSurfaceLineWidth: 'Story Line Width',
+    print3dGrooveDiameter: 'Star Groove Diameter',
+    print3dGrooveDepth: 'Star Groove Depth',
+    print3dOutlinePadding: 'Shape Padding',
+    print3dExportStl: 'Export STL',
+    print3dDesignNotes: 'Print Notes',
+    print3dNoteShape: 'The card outline follows the constellation footprint instead of a fixed rectangle.',
+    print3dNoteGroove: 'Star dots are recessed wells for glow powder and deer-glue binder.',
+    print3dNoteMount: 'Print the model flat, fill the wells after curing, then mount it on the ceiling.',
+    toggleOn: 'On',
+    toggleOff: 'Off',
+    exportedStl: 'Exported constellation STL model.',
+    exportStlFailed: 'STL export failed. Check the current constellation data.',
   },
   zh: {
     appSubtitle: '全天星座星图印刷海报生成器',
+    posterPageLink: '星图海报',
+    constellation3dPageLink: '3D 打印的星座',
     loading: '正在加载全天恒星与星座数据源...',
     loadingSubtext: '首次加载可能需要几秒钟',
     loadError: '无法加载星图数据，请确认是否已运行 Ingestion 脚本。',
@@ -229,7 +969,10 @@ const UI_TEXT = {
     southRotation: '南天图旋转角度',
     layerDisplay: '星空图层显示',
     modernConstellations: '现代星座',
-    constellationLines: '星座连线',
+    constellationLineSet: '星座连线方案',
+    constellationLineStyleOff: '关闭',
+    constellationLineStyleModern: '现代',
+    constellationLineStyleSkyTelescope: 'S&T',
     constellationNames: '星座名称',
     iauBoundaries: 'IAU 星座边界',
     constellationRegionColors: '星座区域着色',
@@ -251,10 +994,12 @@ const UI_TEXT = {
     eclipticPath: '黄道轨迹',
     milkyWayBand: '银河带',
     visibleSky: '肉眼可见天空',
+    visibleSkyTimeWindow: '前后延长 3 小时',
     observerLatitude: '观察纬度',
     observerHour: '本地小时',
     observerMonth: '月份',
     observerCityHint: '点击城市点会同时设置纬度和经度',
+    observerHourHint: '默认只绘制所选小时；开启“前后延长 3 小时”后绘制 6 小时范围。',
     exportSvg: '导出无损矢量 SVG',
     exportPng: '导出印刷级高清 PNG',
     exportTiledPdf: '导出 A4 拼接 PDF',
@@ -272,6 +1017,30 @@ const UI_TEXT = {
     renderingPdf: '正在生成 A4 拼接 PDF...',
     exportedPdf: '成功导出 A4 拼接 PDF。',
     exportPdfFailed: '导出 PDF 失败，请查看控制台日志。',
+    print3dTitle: '3D 打印的星座',
+    print3dSubtitle: '导出星座形状的浮雕卡片，星点为可填荧光粉与鹿胶合剂的凹槽。',
+    print3dConstellation: '星座',
+    print3dCardWidth: '卡片宽度',
+    print3dBaseThickness: '底板厚度',
+    print3dBaseGroup: '底板',
+    print3dLayerGroup: '图层',
+    print3dStarGroup: '星点与凹槽',
+    print3dMythLines: '神话线条',
+    print3dStarConnectionLines: '星星连线凹槽',
+    print3dReliefHeight: '浮雕高度',
+    print3dSurfaceLineWidth: '神话线条宽度',
+    print3dGrooveDiameter: '星点凹槽直径',
+    print3dGrooveDepth: '星点凹槽深度',
+    print3dOutlinePadding: '轮廓留边',
+    print3dExportStl: '导出 STL 模型',
+    print3dDesignNotes: '打印说明',
+    print3dNoteShape: '卡片轮廓跟随星座恒星与连线的形态，不使用固定矩形。',
+    print3dNoteGroove: '星点是带厚度的凹槽，可在内部填入荧光粉与鹿胶合剂。',
+    print3dNoteMount: '模型平放打印，固化后填充星点，再贴到室内天花板。',
+    toggleOn: '有',
+    toggleOff: '无',
+    exportedStl: '已导出星座 STL 模型。',
+    exportStlFailed: '导出 STL 失败，请检查当前星座数据。',
   },
 };
 
@@ -442,12 +1211,562 @@ const buildBoundarySegments = (boundaries) => {
   return segments;
 };
 
+const disposeThreeObject = (object) => {
+  object.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((material) => {
+        if (material.map) material.map.dispose();
+        material.dispose();
+      });
+    }
+  });
+};
+
+const toThreeMatrix = (matrix, scale = 1) => {
+  const threeMatrix = new THREE.Matrix4().set(
+    matrix[0], matrix[1], matrix[2], matrix[3],
+    matrix[4], matrix[5], matrix[6], matrix[7],
+    matrix[8], matrix[9], matrix[10], matrix[11],
+    matrix[12], matrix[13], matrix[14], matrix[15],
+  );
+  return threeMatrix.multiply(new THREE.Matrix4().makeScale(scale, scale, scale));
+};
+
+const createShapeFromOutline = (outline, holes = []) => {
+  const shape = new THREE.Shape();
+  if (outline.length === 0) return shape;
+  shape.moveTo(outline[0].x, -outline[0].y);
+  for (let index = 1; index < outline.length; index++) {
+    shape.lineTo(outline[index].x, -outline[index].y);
+  }
+  shape.closePath();
+  for (const hole of holes) {
+    const path = new THREE.Path();
+    if (Array.isArray(hole.points) && hole.points.length > 2) {
+      path.moveTo(hole.points[0].x, -hole.points[0].y);
+      for (let index = 1; index < hole.points.length; index++) {
+        path.lineTo(hole.points[index].x, -hole.points[index].y);
+      }
+      path.closePath();
+      shape.holes.push(path);
+      continue;
+    }
+    const segments = 40;
+    for (let index = segments; index >= 0; index--) {
+      const angle = (Math.PI * 2 * index) / segments;
+      const x = hole.x + Math.cos(angle) * hole.radius;
+      const y = -hole.y + Math.sin(angle) * hole.radius;
+      if (index === segments) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    shape.holes.push(path);
+  }
+  return shape;
+};
+
+const lineArtPointToModel = (point, lineArt) => ({
+  x: point.x * lineArt.scale + lineArt.offsetX,
+  y: point.y * lineArt.scale + lineArt.offsetY,
+});
+
+const toVector3 = (point, z) => new THREE.Vector3(point.x, -point.y, z);
+
+const createTubeMesh = (points, z, radius, material, closed = false) => {
+  if (points.length < 2) return null;
+  const vectors = points.map((point) => toVector3(point, z));
+  const curve = vectors.length === 2
+    ? new THREE.LineCurve3(vectors[0], vectors[1])
+    : new THREE.CatmullRomCurve3(vectors, closed, 'centripetal');
+  const geometry = new THREE.TubeGeometry(curve, Math.max(6, points.length * 2), radius, 8, closed);
+  return new THREE.Mesh(geometry, material);
+};
+
+const createFlatLineMesh = (points, z, material, closed = false) => {
+  if (points.length < 2) return null;
+  const vectors = points.map((point) => toVector3(point, z));
+  if (closed) vectors.push(vectors[0].clone());
+  const geometry = new THREE.BufferGeometry().setFromPoints(vectors);
+  return new THREE.Line(geometry, material);
+};
+
+const createFlatStripMesh = (points, z, width, material, closed = false) => {
+  if (points.length < 2) return null;
+  const vertices = [];
+  const indices = [];
+  const sourcePoints = closed ? [...points, points[0]] : points;
+
+  for (let index = 0; index < sourcePoints.length - 1; index++) {
+    const a = sourcePoints[index];
+    const b = sourcePoints[index + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const nx = (-dy / length) * width / 2;
+    const ny = (dx / length) * width / 2;
+    const base = vertices.length / 3;
+    vertices.push(
+      a.x + nx, -a.y - ny, z,
+      a.x - nx, -a.y + ny, z,
+      b.x + nx, -b.y - ny, z,
+      b.x - nx, -b.y + ny, z,
+    );
+    indices.push(base, base + 2, base + 1, base + 2, base + 3, base + 1);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, material);
+};
+
+const createStarLabelSprite = (text) => {
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  const fontSize = 34;
+  context.font = `600 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const metrics = context.measureText(text);
+  const width = Math.ceil(metrics.width + 24);
+  const height = 54;
+  canvas.width = Math.min(512, Math.max(128, Math.ceil(width / 2) * 2));
+  canvas.height = 64;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.font = `600 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  context.textBaseline = 'middle';
+  context.fillStyle = 'rgba(255, 252, 242, 0.84)';
+  context.fillRect(0, 4, Math.min(width, canvas.width), height);
+  context.strokeStyle = 'rgba(23, 23, 23, 0.22)';
+  context.lineWidth = 2;
+  context.strokeRect(1, 5, Math.min(width, canvas.width) - 2, height - 2);
+  context.fillStyle = '#171717';
+  context.fillText(text, 12, canvas.height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(material);
+  const labelWidth = Math.max(14, Math.min(42, canvas.width / 10));
+  sprite.scale.set(labelWidth, labelWidth * (canvas.height / canvas.width), 1);
+  return sprite;
+};
+
+const applySvgTransformToPoint = (point, transform) => {
+  if (!transform) return point;
+  const rotate = transform.match(/rotate\(([-\d.]+)(?:[\s,]+([-\d.]+)[\s,]+([-\d.]+))?\)/);
+  if (!rotate) return point;
+  const degrees = Number(rotate[1]);
+  const cx = Number(rotate[2] ?? 0);
+  const cy = Number(rotate[3] ?? 0);
+  if (!Number.isFinite(degrees) || !Number.isFinite(cx) || !Number.isFinite(cy)) return point;
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = point.x - cx;
+  const dy = point.y - cy;
+  return {
+    x: cx + dx * cos - dy * sin,
+    y: cy + dx * sin + dy * cos,
+  };
+};
+
+const sampleEllipsePoints = (ellipse, lineArt) => {
+  const points = [];
+  for (let step = 0; step < 48; step++) {
+    const angle = (Math.PI * 2 * step) / 48;
+    const raw = applySvgTransformToPoint({
+      x: ellipse.cx + Math.cos(angle) * ellipse.rx,
+      y: ellipse.cy + Math.sin(angle) * ellipse.ry,
+    }, ellipse.transform);
+    points.push(lineArtPointToModel(raw, lineArt));
+  }
+  return points;
+};
+
+const getSvgPathPointSets = (paths, lineArt) => {
+  const loader = new SVGLoader();
+  const pointSets = [];
+  const escapeAttr = (value) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  for (const d of paths || []) {
+    const parsed = loader.parse(`<svg xmlns="http://www.w3.org/2000/svg"><path d="${escapeAttr(d)}"/></svg>`);
+    for (const path of parsed.paths) {
+      for (const subPath of path.subPaths || []) {
+        const points = subPath.getPoints(24).map((point) => lineArtPointToModel(point, lineArt));
+        if (points.length > 1) pointSets.push(points);
+      }
+    }
+  }
+  return pointSets;
+};
+
+const createSegmentHole = (from, to, width, insetStart = 0, insetEnd = 0) => {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 0.001) return null;
+  const start = Math.min(length / 2 - 0.001, Math.max(0, insetStart));
+  const end = Math.min(length / 2 - 0.001, Math.max(0, insetEnd));
+  const ax = from.x + (dx / length) * start;
+  const ay = from.y + (dy / length) * start;
+  const bx = to.x - (dx / length) * end;
+  const by = to.y - (dy / length) * end;
+  const nx = (-dy / length) * width / 2;
+  const ny = (dx / length) * width / 2;
+  return {
+    points: [
+      { x: ax + nx, y: ay + ny },
+      { x: bx + nx, y: by + ny },
+      { x: bx - nx, y: by - ny },
+      { x: ax - nx, y: ay - ny },
+    ],
+  };
+};
+
+const addExtrudedShapeMesh = (group, shape, depth, z, material) => {
+  if (depth <= 0.001) return null;
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: false,
+    curveSegments: 16,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.z = z;
+  group.add(mesh);
+  return mesh;
+};
+
+const addSurfaceArtworkMeshes = (group, model, z, width, material) => {
+  const addSurfaceLine = (pointSet, closed = false) => {
+    const mesh = createFlatStripMesh(pointSet, z, width, material, closed);
+    if (mesh) group.add(mesh);
+  };
+
+  if (model.lineArt) {
+    for (const pointSet of getSvgPathPointSets(model.lineArt.paths, model.lineArt)) addSurfaceLine(pointSet);
+    for (const polygon of model.lineArt.polygons || []) {
+      addSurfaceLine(polygon.map((point) => lineArtPointToModel(point, model.lineArt)), true);
+    }
+    for (const ellipse of model.lineArt.ellipses || []) {
+      addSurfaceLine(sampleEllipsePoints(ellipse, model.lineArt), true);
+    }
+  } else {
+    for (const line of model.detailLines || []) addSurfaceLine(line);
+  }
+};
+
+const addSolidArtworkMeshes = (group, model, z, width, depth, material) => {
+  const addSurfaceLine = (pointSet, closed = false) => {
+    const sourcePoints = closed ? [...pointSet, pointSet[0]] : pointSet;
+    for (let index = 0; index < sourcePoints.length - 1; index++) {
+      const strip = createSegmentHole(sourcePoints[index], sourcePoints[index + 1], width);
+      if (!strip) continue;
+      addExtrudedShapeMesh(group, createShapeFromOutline(strip.points), depth, z, material);
+    }
+  };
+
+  if (model.lineArt) {
+    for (const pointSet of getSvgPathPointSets(model.lineArt.paths, model.lineArt)) addSurfaceLine(pointSet);
+    for (const polygon of model.lineArt.polygons || []) {
+      addSurfaceLine(polygon.map((point) => lineArtPointToModel(point, model.lineArt)), true);
+    }
+    for (const ellipse of model.lineArt.ellipses || []) {
+      addSurfaceLine(sampleEllipsePoints(ellipse, model.lineArt), true);
+    }
+  } else {
+    for (const line of model.detailLines || []) addSurfaceLine(line);
+  }
+};
+
+const createConstellationExportObject = (model, settings) => {
+  const group = new THREE.Group();
+  const baseMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const artworkMaterial = new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.DoubleSide });
+  const topZ = settings.baseThicknessMm;
+  const grooveDepth = Math.min(Math.max(0.08, topZ - 0.08), Math.max(1, topZ / 2));
+  const grooveFloorZ = Math.max(0.08, topZ - grooveDepth);
+  const starRadius = settings.grooveDiameterMm / 2;
+  const grooveWidth = Math.max(1.25, settings.grooveDiameterMm * 0.36);
+  const starIsRecessed = settings.starPositionMode !== 'raised';
+  const grooveInset = starIsRecessed ? starRadius + grooveWidth * 0.3 : grooveWidth * 0.5;
+  const grooveHoles = [
+    ...(settings.showStarConnectionLines === false ? [] : model.edges.map((edge) => createSegmentHole(edge.from, edge.to, grooveWidth, grooveInset, grooveInset)).filter(Boolean)),
+    ...(starIsRecessed ? (model.points || []).map((point) => ({
+      x: point.x,
+      y: point.y,
+      radius: starRadius,
+    })) : []),
+  ];
+
+  addExtrudedShapeMesh(group, createShapeFromOutline(model.outline), grooveFloorZ, 0, baseMaterial);
+  addExtrudedShapeMesh(
+    group,
+    createShapeFromOutline(model.outline, grooveHoles),
+    topZ - grooveFloorZ,
+    grooveFloorZ,
+    baseMaterial,
+  );
+
+  if (!starIsRecessed) {
+    const raisedHeight = Math.max(1, settings.baseThicknessMm / 2);
+    for (const point of model.points || []) {
+      const capGeometry = new THREE.CylinderGeometry(starRadius, starRadius, raisedHeight, 48);
+      const cap = new THREE.Mesh(capGeometry, baseMaterial);
+      cap.rotation.x = Math.PI / 2;
+      cap.position.set(point.x, -point.y, topZ + raisedHeight / 2);
+      group.add(cap);
+    }
+  }
+
+  if (settings.showMythLines !== false) {
+    addSolidArtworkMeshes(
+      group,
+      model,
+      topZ,
+      Math.max(0.1, settings.surfaceLineWidthMm || 1),
+      SURFACE_LINE_HEIGHT_MM,
+      artworkMaterial,
+    );
+  }
+
+  group.updateMatrixWorld(true);
+  return group;
+};
+
+const createConstellationStl = (model, settings) => {
+  const exportObject = createConstellationExportObject(model, settings);
+  const exporter = new STLExporter();
+  const stl = exporter.parse(exportObject, { binary: false });
+  disposeThreeObject(exportObject);
+  return stl;
+};
+
+function ConstellationModel3DPreview({ model, settings, modelView, displayLanguage }) {
+  const mountRef = useRef(null);
+  const rendererRef = useRef(null);
+  const cameraRef = useRef(null);
+  const rootRef = useRef(null);
+  const latestModelRef = useRef(model);
+  const resizeRef = useRef(null);
+  const renderSceneRef = useRef(null);
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return undefined;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-100, 100, 75, -75, 0.1, 1200);
+    camera.position.set(0, 0, 500);
+    camera.lookAt(0, 0, 0);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x000000, 0);
+    mount.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    const ambient = new THREE.AmbientLight(0xffffff, 1.45);
+    const key = new THREE.DirectionalLight(0xffffff, 2.4);
+    key.position.set(-70, -90, 180);
+    const rim = new THREE.DirectionalLight(0xffffff, 0.75);
+    rim.position.set(140, 120, 120);
+    scene.add(ambient, key, rim);
+
+    const root = new THREE.Group();
+    root.matrixAutoUpdate = false;
+    scene.add(root);
+    rootRef.current = root;
+
+    const resize = () => {
+      const width = mount.clientWidth || 1;
+      const height = mount.clientHeight || 1;
+      renderer.setSize(width, height, false);
+      const latestModel = latestModelRef.current;
+      const bounds = latestModel?.outline?.length ? getPolygonBounds(latestModel.outline) : { minX: -70, maxX: 70, minY: -70, maxY: 70 };
+      const modelWidth = Math.max(40, bounds.maxX - bounds.minX);
+      const modelHeight = Math.max(40, bounds.maxY - bounds.minY);
+      const frustumHeight = Math.max(modelHeight, modelWidth / (width / height || 1)) * 1.55;
+      const frustumWidth = frustumHeight * (width / height || 1);
+      camera.left = -frustumWidth / 2;
+      camera.right = frustumWidth / 2;
+      camera.top = frustumHeight / 2;
+      camera.bottom = -frustumHeight / 2;
+      camera.updateProjectionMatrix();
+      renderer.render(scene, camera);
+    };
+    resizeRef.current = resize;
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(mount);
+    resize();
+
+    renderSceneRef.current = () => {
+      renderer.render(scene, camera);
+    };
+    renderSceneRef.current();
+
+    return () => {
+      observer.disconnect();
+      disposeThreeObject(scene);
+      renderer.dispose();
+      renderer.domElement.remove();
+      resizeRef.current = null;
+      renderSceneRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    latestModelRef.current = model;
+    const root = rootRef.current;
+    if (!root || !model?.outline?.length) return undefined;
+    resizeRef.current?.();
+
+    while (root.children.length > 0) {
+      const child = root.children.pop();
+      disposeThreeObject(child);
+    }
+
+    const baseTopMaterial = new THREE.MeshStandardMaterial({ color: 0xeee7d6, roughness: 0.82, metalness: 0.02 });
+    const baseSideMaterial = new THREE.MeshStandardMaterial({ color: 0xb8b2a5, roughness: 0.92, metalness: 0.01 });
+    const surfaceLineMaterial = new THREE.MeshBasicMaterial({ color: 0x171717, side: THREE.DoubleSide });
+    const starIsRecessed = settings.starPositionMode !== 'raised';
+
+    const starHoleRadius = settings.grooveDiameterMm / 2;
+    const grooveWidth = Math.max(1.25, settings.grooveDiameterMm * 0.36);
+    const grooveInset = starIsRecessed ? starHoleRadius + grooveWidth * 0.3 : grooveWidth * 0.5;
+    const lineGrooveHoles = settings.showStarConnectionLines === false
+      ? []
+      : (model.edges || []).map((edge) => createSegmentHole(edge.from, edge.to, grooveWidth, grooveInset, grooveInset)).filter(Boolean);
+    const shape = createShapeFromOutline(
+      model.outline,
+      [
+        ...lineGrooveHoles,
+        ...(starIsRecessed ? (model.points || []).map((point) => ({
+          x: point.x,
+          y: point.y,
+          radius: starHoleRadius,
+        })) : []),
+      ],
+    );
+    const baseGeometry = new THREE.ExtrudeGeometry(shape, {
+      depth: settings.baseThicknessMm,
+      bevelEnabled: false,
+      curveSegments: 8,
+    });
+    const baseMesh = new THREE.Mesh(baseGeometry, [baseTopMaterial, baseSideMaterial]);
+    baseMesh.position.z = -settings.baseThicknessMm;
+    root.add(baseMesh);
+
+    const grooveDepth = Math.max(1, settings.baseThicknessMm / 2);
+    const clampedGrooveDepth = Math.min(settings.baseThicknessMm - 0.08, grooveDepth);
+    const grooveFloorZ = -clampedGrooveDepth;
+    const surfaceLineWidth = Math.max(0.1, settings.surfaceLineWidthMm || 1);
+    const addGrooveLine = (pointSet, closed = false) => {
+      const floor = createFlatStripMesh(pointSet, grooveFloorZ, grooveWidth, baseSideMaterial, closed);
+      if (floor) root.add(floor);
+    };
+    if (settings.showMythLines !== false) {
+      addSolidArtworkMeshes(root, model, 0, surfaceLineWidth, SURFACE_LINE_HEIGHT_MM, surfaceLineMaterial);
+    }
+    if (settings.showStarConnectionLines !== false) {
+      for (const edge of model.edges || []) addGrooveLine([edge.from, edge.to]);
+    }
+
+    for (const point of model.points || []) {
+      const radius = settings.grooveDiameterMm / 2;
+      if (starIsRecessed) {
+        const wallGeometry = new THREE.CylinderGeometry(radius, radius, clampedGrooveDepth, 40, 1, true);
+        const wall = new THREE.Mesh(wallGeometry, baseSideMaterial);
+        wall.rotation.x = Math.PI / 2;
+        wall.position.set(point.x, -point.y, -clampedGrooveDepth / 2);
+        root.add(wall);
+
+        const bottomGeometry = new THREE.CircleGeometry(radius, 40);
+        const bottom = new THREE.Mesh(bottomGeometry, baseSideMaterial);
+        bottom.position.set(point.x, -point.y, -clampedGrooveDepth);
+        root.add(bottom);
+      } else {
+        const raisedHeight = Math.max(1, settings.baseThicknessMm / 2);
+        const capGeometry = new THREE.CylinderGeometry(radius, radius, raisedHeight, 40);
+        const cap = new THREE.Mesh(capGeometry, baseTopMaterial);
+        cap.rotation.x = Math.PI / 2;
+        cap.position.set(point.x, -point.y, raisedHeight / 2);
+        root.add(cap);
+      }
+    }
+
+    for (const point of model.points || []) {
+      const label = displayLanguage === 'zh'
+        ? (point.nameZh || point.nameEn)
+        : (point.nameEn || point.nameZh);
+      if (!label) continue;
+      const sprite = createStarLabelSprite(label);
+      const labelZ = starIsRecessed ? 0.55 : Math.max(1, settings.baseThicknessMm / 2) + 0.65;
+      sprite.position.set(
+        point.x + settings.grooveDiameterMm * 0.85 + 1.6,
+        -point.y + settings.grooveDiameterMm * 0.55 + 1.2,
+        labelZ,
+      );
+      root.add(sprite);
+    }
+
+    if (mountRef.current) {
+      mountRef.current.dataset.renderMode = 'three-mesh';
+      mountRef.current.dataset.baseThicknessMm = String(settings.baseThicknessMm);
+      mountRef.current.dataset.reliefHeightMm = String(settings.reliefHeightMm);
+      mountRef.current.dataset.surfaceLineWidthMm = String(surfaceLineWidth);
+      mountRef.current.dataset.surfaceLineHeightMm = String(SURFACE_LINE_HEIGHT_MM);
+      mountRef.current.dataset.showMythLines = String(settings.showMythLines !== false);
+      mountRef.current.dataset.showStarConnectionLines = String(settings.showStarConnectionLines !== false);
+      mountRef.current.dataset.lineGrooveHoleCount = String(lineGrooveHoles.length);
+      mountRef.current.dataset.lineGrooveEdgeSource = model.edgeSource || 'projected';
+      mountRef.current.dataset.lineGrooveFloorNormals = 'up';
+      mountRef.current.dataset.grooveDiameterMm = String(settings.grooveDiameterMm);
+      mountRef.current.dataset.grooveDepthMm = String(clampedGrooveDepth);
+      mountRef.current.dataset.starPositionMode = settings.starPositionMode;
+      mountRef.current.dataset.outlinePoints = String(model.outline.length);
+      mountRef.current.dataset.starCount = String(model.points?.length || 0);
+      mountRef.current.dataset.starLabelCount = String((model.points || []).filter((point) => point.nameEn || point.nameZh).length);
+      mountRef.current.dataset.meshCount = String(root.children.length);
+      mountRef.current.dataset.groovePreview = starIsRecessed ? 'subtracted-material-holes' : 'raised-material-stars';
+    }
+    renderSceneRef.current?.();
+
+    return () => {
+      while (root.children.length > 0) {
+        const child = root.children.pop();
+        disposeThreeObject(child);
+      }
+    };
+  }, [model, settings, displayLanguage]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const matrix = toThreeMatrix(multiplyMatrix4(modelView.viewMatrix, modelView.modelMatrix), modelView.scale);
+    root.matrix.copy(matrix);
+    if (mountRef.current) {
+      mountRef.current.dataset.viewPitchDeg = getCardViewPitchDegrees(modelView.viewMatrix).toFixed(2);
+    }
+    renderSceneRef.current?.();
+  }, [modelView]);
+
+  return <div ref={mountRef} className="constellation-3d-canvas" data-testid="constellation-3d-canvas" data-render-mode="three-mesh" />;
+}
+
 function App() {
   // --- State Variables ---
   const [stars, setStars] = useState([]);
   const [westernConstellations, setWesternConstellations] = useState([]);
+  const [westernStConstellations, setWesternStConstellations] = useState([]);
   const [chineseConstellations, setChineseConstellations] = useState([]);
   const [boundaries, setBoundaries] = useState({});
+  const [constellationLineArt, setConstellationLineArt] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
@@ -458,6 +1777,7 @@ function App() {
   const posterMockupRef = useRef(null);
   const transformRef = useRef({ scale: 1, x: 0, y: 0 });
   const dragStateRef = useRef(null);
+  const modelDragStateRef = useRef(null);
   const activePointersRef = useRef(new Map());
   const pinchStateRef = useRef(null);
   const gestureStateRef = useRef(null);
@@ -474,9 +1794,12 @@ function App() {
   const sphereRequestIdRef = useRef(0);
 
   // --- Poster & Layout Settings ---
+  const [currentPage, setCurrentPage] = useState(getInitialPage);
   const [labelLanguageMode, setLabelLanguageMode] = useState(getInitialLanguageMode);
   const displayLanguage = getDisplayLanguage(labelLanguageMode);
   const uiText = UI_TEXT[displayLanguage];
+  const [modelSettings, setModelSettings] = useState(DEFAULT_3D_MODEL_SETTINGS);
+  const [modelView, setModelView] = useState(DEFAULT_3D_VIEW);
   const [titleOverrides, setTitleOverrides] = useState({});
   const [customNoteOverrides, setCustomNoteOverrides] = useState({});
   const title = titleOverrides[displayLanguage] ?? POSTER_COPY_PRESETS[displayLanguage].title;
@@ -495,7 +1818,7 @@ function App() {
   const [southRotation, setSouthRotation] = useState(0); // rotation in degrees
 
   // --- Layer Toggles ---
-  const [showWesternLines, setShowWesternLines] = useState(true);
+  const [westernLineStyle, setWesternLineStyle] = useState(DEFAULT_WESTERN_LINE_STYLE);
   const [showWesternBoundaries, setShowWesternBoundaries] = useState(true);
   const [showWesternBoundaryFills, setShowWesternBoundaryFills] = useState(false);
   const [showWesternNames, setShowWesternNames] = useState(true);
@@ -508,6 +1831,7 @@ function App() {
   const [showEcliptic, setShowEcliptic] = useState(false);
   const [showMilkyWay, setShowMilkyWay] = useState(true);
   const [showVisibleSky, setShowVisibleSky] = useState(true);
+  const [showVisibleSkyTimeWindow, setShowVisibleSkyTimeWindow] = useState(false);
   const [observerLatitude, setObserverLatitude] = useState(DEFAULT_OBSERVER.latitude);
   const [observerLongitude, setObserverLongitude] = useState(DEFAULT_OBSERVER.longitude);
   const [observerMonth, setObserverMonth] = useState(initialDateParts.month);
@@ -528,7 +1852,11 @@ function App() {
   const renderOverlapDec = renderSettings.overlapDec;
   const renderNorthRotation = renderSettings.northRotation;
   const renderSouthRotation = renderSettings.southRotation;
-  const renderShowWesternLines = renderSettings.showWesternLines;
+  const legacyWesternLineStyle = renderSettings.showWesternLines === false
+    ? WESTERN_LINE_STYLE_OFF
+    : DEFAULT_WESTERN_LINE_STYLE;
+  const renderWesternLineStyle = normalizeWesternLineStyle(renderSettings.westernLineStyle ?? legacyWesternLineStyle);
+  const renderShowWesternLines = renderWesternLineStyle !== WESTERN_LINE_STYLE_OFF;
   const renderShowWesternBoundaries = renderSettings.showWesternBoundaries;
   const renderShowWesternBoundaryFills = renderSettings.showWesternBoundaryFills;
   const renderShowWesternNames = renderSettings.showWesternNames;
@@ -539,6 +1867,7 @@ function App() {
   const renderShowEcliptic = renderSettings.showEcliptic;
   const renderShowMilkyWay = renderSettings.showMilkyWay;
   const renderShowVisibleSky = renderSettings.showVisibleSky;
+  const renderShowVisibleSkyTimeWindow = renderSettings.showVisibleSkyTimeWindow;
   const renderShowStarNames = renderSettings.showStarNames;
 
   const hidePosterRenderNoticeSoon = () => {
@@ -586,6 +1915,16 @@ function App() {
     window.history.replaceState(null, '', url);
   }, [labelLanguageMode]);
 
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (currentPage === 'poster') {
+      url.searchParams.delete('page');
+    } else {
+      url.searchParams.set('page', currentPage);
+    }
+    window.history.replaceState(null, '', url);
+  }, [currentPage]);
+
   useEffect(() => () => {
     if (renderNoticeTimerRef.current !== null) {
       clearTimeout(renderNoticeTimerRef.current);
@@ -625,17 +1964,23 @@ function App() {
         setLoading(true);
         // Fetch JSON files compiled by ingest script
         const basePath = import.meta.env.BASE_URL || '/';
-        const [starsRes, westernRes, chineseRes, boundariesRes] = await Promise.all([
+        const [starsRes, westernRes, westernStRes, chineseRes, boundariesRes, lineArtRes] = await Promise.all([
           fetch(`${basePath}data/stars.normalized.json`).then(r => r.json()),
           fetch(`${basePath}data/constellations.western.json`).then(r => r.json()),
+          fetch(`${basePath}data/constellations.western_st.json`).then(r => r.json()),
           fetch(`${basePath}data/constellations.chinese.json`).then(r => r.json()),
           fetch(`${basePath}data/boundaries.json`).then(r => r.json()),
+          fetch(`${basePath}data/noirlab-lineart.json`)
+            .then(r => r.ok ? r.json() : { constellations: {} })
+            .catch(() => ({ constellations: {} })),
         ]);
 
         setStars(starsRes);
         setWesternConstellations(westernRes);
+        setWesternStConstellations(westernStRes);
         setChineseConstellations(chineseRes);
         setBoundaries(boundariesRes);
+        setConstellationLineArt(lineArtRes.constellations || {});
         setLoading(false);
       } catch (err) {
         console.error("Failed to load astronomical data:", err);
@@ -673,8 +2018,27 @@ function App() {
     return map;
   }, [stars]);
 
+  const selected3dConstellation = useMemo(() => (
+    westernConstellations.find((constellation) => constellation.abbr === modelSettings.constellationAbbr) ||
+    westernConstellations.find((constellation) => constellation.abbr === DEFAULT_3D_MODEL_SETTINGS.constellationAbbr) ||
+    westernConstellations[0]
+  ), [westernConstellations, modelSettings.constellationAbbr]);
+
+  useEffect(() => {
+    if (!selected3dConstellation) return;
+    modelDragStateRef.current = null;
+    setModelView((current) => ({
+      ...current,
+      modelMatrix: DEFAULT_3D_VIEW.modelMatrix,
+    }));
+  }, [selected3dConstellation?.abbr]);
+
+  const constellation3dModel = useMemo(() => (
+    projectConstellationModel(selected3dConstellation, starsMap, modelSettings, constellationLineArt)
+  ), [selected3dConstellation, starsMap, modelSettings, constellationLineArt]);
+
   // --- Centroid Calculation for Constellations (Spherical Average) ---
-  const getConstellationCentroid = (edges) => {
+  const getConstellationCentroid = useCallback((edges) => {
     if (!edges || edges.length === 0) return null;
     let sumX = 0, sumY = 0, sumZ = 0;
     let count = 0;
@@ -706,17 +2070,23 @@ function App() {
     if (ra < 0) ra += 360;
 
     return { ra, dec };
-  };
+  }, [starsMap]);
+
+  const renderWesternConstellations = useMemo(() => (
+    renderWesternLineStyle === WESTERN_LINE_STYLE_SKY_TELESCOPE
+      ? westernStConstellations
+      : westernConstellations
+  ), [renderWesternLineStyle, westernConstellations, westernStConstellations]);
 
   // --- Centroid Lookup for Constellations ---
   const westernCenters = useMemo(() => {
     const centers = {};
-    for (const con of westernConstellations) {
+    for (const con of renderWesternConstellations) {
       const center = getConstellationCentroid(con.edges);
       if (center) centers[con.abbr] = center;
     }
     return centers;
-  }, [westernConstellations, starsMap]);
+  }, [renderWesternConstellations, getConstellationCentroid]);
 
   const chineseCenters = useMemo(() => {
     const centers = {};
@@ -725,7 +2095,7 @@ function App() {
       if (center) centers[asterism.id] = center;
     }
     return centers;
-  }, [chineseConstellations, starsMap]);
+  }, [chineseConstellations, getConstellationCentroid]);
 
   const boundarySegments = useMemo(() => buildBoundarySegments(boundaries), [boundaries]);
   const boundaryColorMap = useMemo(() => (
@@ -735,7 +2105,7 @@ function App() {
   const constellationStarHips = useMemo(() => {
     const hips = new Set();
     if (renderShowWesternLines) {
-      for (const con of westernConstellations) {
+      for (const con of renderWesternConstellations) {
         for (const [hip1, hip2] of con.edges) {
           hips.add(hip1);
           hips.add(hip2);
@@ -751,7 +2121,7 @@ function App() {
       }
     }
     return hips;
-  }, [westernConstellations, chineseConstellations, renderShowWesternLines, renderShowChineseLines]);
+  }, [renderWesternConstellations, chineseConstellations, renderShowWesternLines, renderShowChineseLines]);
 
   // --- Top Brightest Stars list for Poster Table ---
   const brightestStars = useMemo(() => {
@@ -787,11 +2157,12 @@ function App() {
   const getVisibleSkyParameterText = () => {
     const lat = formatSignedDegree(renderSettings.observerLatitude, 'N', 'S');
     const lon = formatSignedDegree(renderSettings.observerLongitude, 'E', 'W');
-    const dateText = `${renderSettings.observerMonth}/${renderSettings.observerDay}`;
-    const hourText = `${String(renderSettings.observerHour).padStart(2, '0')}:00`;
+    const timeText = renderShowVisibleSkyTimeWindow
+      ? getVisibleSkyTimeRangeText()
+      : getVisibleSkyHourText();
     return getLocalizedText(
-      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 日期 ${dateText}, 本地时间 ${hourText} 在地平线以上的星空区域。`,
-      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Date ${dateText}, Local time ${hourText}.`,
+      `肉眼可见天空: 纬度 ${lat}, 经度 ${lon}, 本地时间 ${timeText} 在地平线以上的星空区域。`,
+      `Visible sky: sky above the horizon at Lat ${lat}, Lon ${lon}, Local time ${timeText}.`,
       'en-first'
     );
   };
@@ -811,6 +2182,21 @@ function App() {
     star.colorIdx < 0.8 ? 'G' :
     star.colorIdx < 1.3 ? 'K' : 'M'
   );
+
+  const formatDateHour = (date) => (
+    `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:00`
+  );
+
+  const getVisibleSkyHourText = () => (
+    formatDateHour(new Date(renderSettings.observerTimestampMs))
+  );
+
+  const getVisibleSkyTimeRangeText = () => {
+    const center = new Date(renderSettings.observerTimestampMs);
+    const start = new Date(center.getTime() - 3 * 60 * 60 * 1000);
+    const end = new Date(center.getTime() + 3 * 60 * 60 * 1000);
+    return `${formatDateHour(start)}-${formatDateHour(end)}`;
+  };
 
   const estimateSvgTextWidth = (text, fontSize) => {
     let width = 0;
@@ -1013,7 +2399,7 @@ function App() {
       settings: renderSettings,
       typography: activeTypography,
       stars,
-      westernConstellations,
+      westernConstellations: renderWesternConstellations,
       chineseConstellations,
       boundaries,
       boundarySegments,
@@ -1031,7 +2417,7 @@ function App() {
     renderSettings,
     activeTypography,
     stars,
-    westernConstellations,
+    renderWesternConstellations,
     chineseConstellations,
     boundaries,
     boundarySegments,
@@ -1985,7 +3371,7 @@ function App() {
 
     // Constellation labels
     if (renderShowWesternNames) {
-      for (const con of westernConstellations) {
+      for (const con of renderWesternConstellations) {
         const center = westernCenters[con.abbr];
         if (!center) continue;
         const inPrimaryHemisphere = isNorth ? center.dec >= 0 : center.dec < 0;
@@ -2266,7 +3652,7 @@ function App() {
           })}
 
           {/* Western Constellation Lines */}
-          {renderShowWesternLines && westernConstellations.map((con, idx) => {
+          {renderShowWesternLines && renderWesternConstellations.map((con, idx) => {
             return con.edges.map(([hip1, hip2], eIdx) => {
               const s1 = starsMap.get(hip1);
               const s2 = starsMap.get(hip2);
@@ -2431,6 +3817,31 @@ function App() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  const exportConstellationStl = () => {
+    if (!constellation3dModel || !selected3dConstellation) {
+      showToast(uiText.exportStlFailed);
+      return;
+    }
+    try {
+      const modelName = `${selected3dConstellation.abbr.toLowerCase()}_glow_constellation_card`;
+      const stl = createConstellationStl(constellation3dModel, modelSettings, modelName);
+      const previewNode = document.querySelector('[data-testid="constellation-3d-canvas"]');
+      if (previewNode) {
+        previewNode.dataset.lastStlExporter = 'three-vector';
+        previewNode.dataset.lastStlBytes = String(stl.length);
+        previewNode.dataset.lastStlFacets = String((stl.match(/facet normal/g) || []).length);
+        previewNode.dataset.lastStlSurfaceLineHeightMm = String(SURFACE_LINE_HEIGHT_MM);
+        previewNode.dataset.lastStlMythLines = String(modelSettings.showMythLines !== false);
+        previewNode.dataset.lastStlStarConnectionLines = String(modelSettings.showStarConnectionLines !== false);
+      }
+      downloadBlob(new Blob([stl], { type: 'model/stl' }), `${modelName}.stl`);
+      showToast(uiText.exportedStl);
+    } catch (e) {
+      console.error(e);
+      showToast(uiText.exportStlFailed);
+    }
   };
 
   const canvasToBlob = (canvas, type = 'image/jpeg', quality = 0.92) => (
@@ -2671,6 +4082,255 @@ function App() {
     }, 100);
   };
 
+  const updateModelSetting = (key, value) => {
+    setModelSettings((current) => ({ ...current, [key]: value }));
+  };
+
+  const handleModelPointerDown = (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    modelDragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      viewMatrix: modelView.viewMatrix,
+      modelMatrix: modelView.modelMatrix,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const handleModelPointerMove = (event) => {
+    const dragState = modelDragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - dragState.startX;
+    const deltaY = event.clientY - dragState.startY;
+    const localSpinAroundNormal = rotationZMatrix(deltaX * 0.35);
+    const spunAroundModelNormal = multiplyMatrix4(dragState.modelMatrix, localSpinAroundNormal);
+    const limitedViewMatrix = applyLimitedViewPitch(dragState.viewMatrix, deltaY * 0.35);
+    setModelView((current) => ({
+      ...current,
+      viewMatrix: limitedViewMatrix,
+      modelMatrix: spunAroundModelNormal,
+    }));
+  };
+
+  const stopModelPointerDrag = (event) => {
+    if (modelDragStateRef.current?.pointerId !== event.pointerId) return;
+    modelDragStateRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+
+  const handleModelWheel = (event) => {
+    event.preventDefault();
+    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+    const zoomFactor = Math.exp(-delta * 0.0015);
+    setModelView((current) => ({
+      ...current,
+      scale: clampModelScale(current.scale * zoomFactor),
+    }));
+  };
+
+  const renderModelRange = (key, label, min, max, step, unit = 'mm') => (
+    <div className="form-field">
+      <label>
+        {label} <span className="value">{modelSettings[key].toFixed(step < 1 ? 1 : 0)} {unit}</span>
+      </label>
+      <input
+        type="range"
+        className="slider-input"
+        min={min}
+        max={max}
+        step={step}
+        value={modelSettings[key]}
+        onInput={(e) => updateModelSetting(key, Number(e.currentTarget.value))}
+        onChange={(e) => updateModelSetting(key, Number(e.target.value))}
+      />
+    </div>
+  );
+
+  const renderModelSegmentToggle = (key, label, options = {}) => {
+    const checked = modelSettings[key] !== false;
+    const compactInline = options.compactInline === true;
+    return (
+      <div className={`form-field ${compactInline ? 'inline-toggle-field' : ''}`}>
+        <label>{label}</label>
+        <div className={`segmented-control ${compactInline ? 'segmented-control-compact' : ''}`} role="group" aria-label={label}>
+          <button
+            type="button"
+            className={`segment-button ${checked ? 'active' : ''}`}
+            onClick={() => updateModelSetting(key, true)}
+          >
+            {uiText.toggleOn}
+          </button>
+          <button
+            type="button"
+            className={`segment-button ${!checked ? 'active' : ''}`}
+            onClick={() => updateModelSetting(key, false)}
+          >
+            {uiText.toggleOff}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderModelValueSegmentToggle = (key, label, options) => {
+    const compactInline = options.compactInline === true;
+    return (
+      <div className={`form-field ${compactInline ? 'inline-toggle-field' : ''}`}>
+        <label>{label}</label>
+        <div className={`segmented-control ${compactInline ? 'segmented-control-compact' : ''}`} role="group" aria-label={label}>
+          {options.items.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              className={`segment-button ${modelSettings[key] === item.value ? 'active' : ''}`}
+              onClick={() => updateModelSetting(key, item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderConstellation3dPage = () => {
+    const points = constellation3dModel?.points ?? [];
+    const edges = constellation3dModel?.edges ?? [];
+    const computedGrooveDepthMm = Math.min(
+      Math.max(0.08, modelSettings.baseThicknessMm - 0.08),
+      Math.max(1, modelSettings.baseThicknessMm / 2),
+    );
+
+    return (
+      <>
+        <aside className="sidebar">
+          <header className="sidebar-header">
+            <h1><span>ALLSKY</span> ATLAS</h1>
+            <p>{uiText.appSubtitle}</p>
+            <nav className="sidebar-page-links" aria-label="Feature navigation">
+              <button type="button" onClick={() => setCurrentPage('poster')}>{uiText.posterPageLink}</button>
+              <button type="button" className="active" onClick={() => setCurrentPage('constellation-3d')}>{uiText.constellation3dPageLink}</button>
+            </nav>
+          </header>
+
+          <div className="sidebar-content">
+            <div className="control-group">
+              <h3 className="control-group-title">{uiText.print3dTitle}</h3>
+              <div className="form-field">
+                <label>{uiText.print3dConstellation}</label>
+                <select
+                  className="select-input"
+                  value={selected3dConstellation?.abbr ?? modelSettings.constellationAbbr}
+                  onChange={(e) => updateModelSetting('constellationAbbr', e.target.value)}
+                >
+                  {[...westernConstellations]
+                    .sort((a, b) => a.nameEn.localeCompare(b.nameEn))
+                    .map((constellation) => (
+                      <option key={constellation.abbr} value={constellation.abbr}>
+                        {displayLanguage === 'zh'
+                          ? `${constellation.nameZh} (${constellation.nameEn})`
+                          : `${constellation.nameEn} (${constellation.abbr})`}
+                      </option>
+                  ))}
+                </select>
+              </div>
+              <div className="control-subgroup">
+                <h4 className="control-subgroup-title">{uiText.print3dBaseGroup}</h4>
+                {renderModelRange('cardWidthMm', uiText.print3dCardWidth, 70, 180, 1)}
+                {renderModelRange('baseThicknessMm', uiText.print3dBaseThickness, 1.2, 6, 0.1)}
+                {renderModelRange('outlinePaddingMm', uiText.print3dOutlinePadding, 4, 24, 0.5)}
+              </div>
+              <div className="control-subgroup">
+                <h4 className="control-subgroup-title">{uiText.print3dLayerGroup}</h4>
+                {renderModelSegmentToggle('showMythLines', uiText.print3dMythLines, { compactInline: true })}
+                {modelSettings.showMythLines !== false && renderModelRange('surfaceLineWidthMm', uiText.print3dSurfaceLineWidth, 0.2, 4, 0.1)}
+                {renderModelSegmentToggle('showStarConnectionLines', uiText.print3dStarConnectionLines, { compactInline: true })}
+              </div>
+              <div className="control-subgroup">
+                <h4 className="control-subgroup-title">{uiText.print3dStarGroup}</h4>
+                {renderModelValueSegmentToggle('starPositionMode', displayLanguage === 'zh' ? '星点形态' : 'Star position style', {
+                  compactInline: true,
+                  items: [
+                    { value: 'recessed', label: displayLanguage === 'zh' ? '凹陷' : 'In' },
+                    { value: 'raised', label: displayLanguage === 'zh' ? '凸起' : 'Out' },
+                  ],
+                })}
+                {renderModelRange('grooveDiameterMm', uiText.print3dGrooveDiameter, 2.4, 10, 0.1)}
+                <div className="form-field">
+                  <label>
+                    {uiText.print3dGrooveDepth} <span className="value">{computedGrooveDepthMm.toFixed(1)} mm</span>
+                  </label>
+                  <p className="control-tip compact">{displayLanguage === 'zh' ? '自动使用底板厚度的 1/2，且至少 1 mm。' : 'Automatically uses half of the base thickness, with a 1 mm minimum.'}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="control-group">
+              <button className="btn-primary" onClick={exportConstellationStl}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                {uiText.print3dExportStl}
+              </button>
+            </div>
+
+            <div className="control-group">
+              <h3 className="control-group-title">{uiText.print3dDesignNotes}</h3>
+              <p className="control-tip">{uiText.print3dNoteShape}</p>
+              <p className="control-tip">{uiText.print3dNoteGroove}</p>
+              <p className="control-tip">{uiText.print3dNoteMount}</p>
+            </div>
+          </div>
+
+          <footer className="sidebar-footer">
+            <p>© 2026 Astronomy Poster Builder</p>
+          </footer>
+        </aside>
+
+        <main className="constellation-3d-area">
+          {(toast || isPosterRendering) && (
+            <div className="preview-toast-stack" aria-live="polite">
+              {toast && <div className="toast" role="status">{toast}</div>}
+            </div>
+          )}
+          <section className="constellation-3d-workbench">
+            <div className="constellation-3d-heading">
+              <div>
+                <p>{uiText.print3dTitle}</p>
+                <h2>{displayLanguage === 'zh' ? selected3dConstellation?.nameZh : selected3dConstellation?.nameEn}</h2>
+              </div>
+              <span>{selected3dConstellation?.abbr}</span>
+            </div>
+            <div
+              className="constellation-3d-preview"
+              onPointerDown={handleModelPointerDown}
+              onPointerMove={handleModelPointerMove}
+              onPointerUp={stopModelPointerDrag}
+              onPointerCancel={stopModelPointerDrag}
+              onWheel={handleModelWheel}
+            >
+              <ConstellationModel3DPreview
+                model={constellation3dModel}
+                settings={modelSettings}
+                modelView={modelView}
+                displayLanguage={displayLanguage}
+              />
+            </div>
+            <div className="constellation-3d-specs">
+              <span>{modelSettings.cardWidthMm.toFixed(0)} mm</span>
+              <span>{points.length} stars</span>
+              <span>{edges.length} lines</span>
+              <span>{Math.round(modelView.scale * 100)}% view</span>
+            </div>
+            <div className="constellation-3d-material-legend" aria-label="Print materials">
+              <span><i className="material-color-plane"></i>{displayLanguage === 'zh' ? '底板材料' : 'Plane material'}</span>
+              <span><i className="material-color-outline"></i>{displayLanguage === 'zh' ? '轮廓材料' : 'Outline material'}</span>
+            </div>
+          </section>
+        </main>
+      </>
+    );
+  };
+
   if (loading) {
     return (
       <div className="loading-overlay">
@@ -2692,11 +4352,17 @@ function App() {
 
   return (
     <div className="app-container">
+      {currentPage === 'constellation-3d' ? renderConstellation3dPage() : (
+      <>
       {/* Glassmorphic Sidebar Controls */}
       <aside className="sidebar">
         <header className="sidebar-header">
           <h1><span>ALLSKY</span> ATLAS</h1>
           <p>{uiText.appSubtitle}</p>
+          <nav className="sidebar-page-links" aria-label="Feature navigation">
+            <button type="button" className="active" onClick={() => setCurrentPage('poster')}>{uiText.posterPageLink}</button>
+            <button type="button" onClick={() => setCurrentPage('constellation-3d')}>{uiText.constellation3dPageLink}</button>
+          </nav>
         </header>
 
         <div className="sidebar-content">
@@ -2964,7 +4630,19 @@ function App() {
                 value={observerHour}
                 onChange={(e) => updateObserverHour(Number(e.target.value))}
               />
+              <p className="field-hint">{uiText.observerHourHint}</p>
             </div>
+            <ToggleRow
+              checked={showVisibleSkyTimeWindow}
+              onChange={(checked) => schedulePosterUpdate(
+                () => setShowVisibleSkyTimeWindow(checked),
+                { showVisibleSkyTimeWindow: checked }
+              )}
+              indented
+              muted={!showVisibleSky}
+            >
+              {uiText.visibleSkyTimeWindow}
+            </ToggleRow>
             <div className="form-field">
               <label>
                 {uiText.observerMonth} <span className="value">{observerMonth}</span>
@@ -2986,13 +4664,35 @@ function App() {
             <h3 className="control-group-title">{uiText.layerDisplay}</h3>
 
             <div className="control-subgroup">
-              <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
-              <ToggleRow checked={showWesternLines} onChange={(checked) => schedulePosterUpdate(
-                () => setShowWesternLines(checked),
-                { showWesternLines: checked }
-              )}>
-                {uiText.constellationLines}
-              </ToggleRow>
+              <div className="control-subgroup-heading">
+                <h4 className="control-subgroup-title">{uiText.modernConstellations}</h4>
+                <div
+                  className="segmented-control segmented-control-three constellation-line-style-toggle"
+                  role="group"
+                  aria-label={uiText.constellationLineSet}
+                >
+                  {WESTERN_LINE_STYLE_OPTIONS.map((style) => {
+                    const label = style === WESTERN_LINE_STYLE_OFF
+                      ? uiText.constellationLineStyleOff
+                      : style === WESTERN_LINE_STYLE_SKY_TELESCOPE
+                        ? uiText.constellationLineStyleSkyTelescope
+                        : uiText.constellationLineStyleModern;
+                    return (
+                      <button
+                        key={style}
+                        type="button"
+                        className={`segment-button ${westernLineStyle === style ? 'active' : ''}`}
+                        onClick={() => schedulePosterUpdate(
+                          () => setWesternLineStyle(style),
+                          { westernLineStyle: style }
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <ToggleRow checked={showWesternNames} onChange={(checked) => schedulePosterUpdate(
                 () => setShowWesternNames(checked),
                 { showWesternNames: checked }
@@ -3395,6 +5095,8 @@ function App() {
           <div>viewport={inputProbe.visualScale} target={inputProbe.target || '-'}</div>
           <div>{inputProbe.time}</div>
         </div>
+      )}
+      </>
       )}
     </div>
   );
