@@ -402,6 +402,30 @@ body {
   background: rgba(0, 0, 0, 0.22);
 }
 
+.inline-toggle-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.inline-toggle-field label {
+  display: block;
+}
+
+.segmented-control-compact {
+  width: 76px;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.segmented-control-compact .segment-button {
+  min-height: 22px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
 .segment-button {
   min-height: 30px;
   border: 0;
@@ -672,6 +696,20 @@ input:checked + .slider-switch:before {
   cursor: grabbing;
 }
 
+.constellation-3d-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.constellation-3d-canvas canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
 .constellation-3d-camera,
 .constellation-3d-model {
   position: relative;
@@ -691,106 +729,42 @@ input:checked + .slider-switch:before {
   pointer-events: none;
 }
 
-.model-axis-layer {
-  position: absolute;
-  inset: 0;
-  transform-style: preserve-3d;
-  pointer-events: none;
-}
-
-.model-axis {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 104px;
-  height: 4px;
-  border-radius: 999px;
-  transform-origin: 0 50%;
-  box-shadow: 0 0 10px currentColor;
-}
-
-.model-axis::after {
-  content: "";
-  position: absolute;
-  right: -8px;
-  top: 50%;
-  width: 0;
-  height: 0;
-  border-top: 7px solid transparent;
-  border-bottom: 7px solid transparent;
-  border-left: 12px solid currentColor;
-  transform: translateY(-50%);
-}
-
-.model-axis b {
-  position: absolute;
-  right: -26px;
-  top: -23px;
-  color: currentColor;
-  font: 800 13px var(--font-ui);
-  text-shadow: 0 1px 4px #000;
-}
-
-.model-axis-x {
-  color: #ff5b5b;
-  background: currentColor;
-  transform: translate3d(0, -50%, 9px);
-}
-
-.model-axis-y {
-  color: #70e66f;
-  background: currentColor;
-  transform: translate3d(0, -50%, 9px) rotateZ(-90deg);
-}
-
-.model-axis-z {
-  color: #5ea8ff;
-  background: currentColor;
-  transform: translate3d(0, -50%, 9px) rotateY(-90deg);
-}
-
-.model-axis-origin {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 12px;
-  height: 12px;
-  border: 2px solid #ffffff;
-  border-radius: 50%;
-  background: #101015;
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.75);
-  transform: translate3d(-50%, -50%, 13px);
-}
-
 .model-outline {
-  fill: #b7a16a;
-  stroke: #f2d686;
-  stroke-width: 1.6;
-  filter: drop-shadow(0 18px 24px rgba(0, 0, 0, 0.45));
+  fill: #eee7d6;
+  stroke: none;
+  stroke-linejoin: round;
+  filter:
+    drop-shadow(0 2px 0 rgba(255, 255, 255, 0.26))
+    drop-shadow(0 20px 26px rgba(0, 0, 0, 0.42));
 }
 
 .model-ridge {
-  stroke: rgba(38, 31, 16, 0.58);
-  stroke-width: 1.25;
+  stroke: #171717;
+  stroke-width: 1.65;
   stroke-linecap: round;
 }
 
 .model-detail-line {
   fill: none;
-  stroke: rgba(255, 236, 168, 0.56);
-  stroke-width: 1.7;
+  stroke: #171717;
+  stroke-width: 2.15;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
+.model-line-art .model-detail-line {
+  vector-effect: non-scaling-stroke;
+}
+
 .model-star-well {
-  fill: #1b1510;
-  stroke: #f7e7a6;
-  stroke-width: 0.7;
+  fill: #151515;
+  stroke: #151515;
+  stroke-width: 0.85;
 }
 
 .model-star-core {
-  fill: rgba(214, 255, 151, 0.88);
+  fill: #d9ff83;
+  opacity: 0.92;
 }
 
 .constellation-3d-specs {
@@ -810,7 +784,7 @@ input:checked + .slider-switch:before {
   text-align: center;
 }
 
-.constellation-3d-axis-legend {
+.constellation-3d-material-legend {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
@@ -818,29 +792,26 @@ input:checked + .slider-switch:before {
   font: 700 11px var(--font-ui);
 }
 
-.constellation-3d-axis-legend span {
+.constellation-3d-material-legend span {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.constellation-3d-axis-legend i {
+.constellation-3d-material-legend i {
   width: 18px;
-  height: 3px;
+  height: 9px;
   border-radius: 999px;
   display: inline-block;
+  border: 1px solid rgba(255, 255, 255, 0.18);
 }
 
-.axis-color-x {
-  background: #ff5b5b;
+.material-color-plane {
+  background: #eee7d6;
 }
 
-.axis-color-y {
-  background: #70e66f;
-}
-
-.axis-color-z {
-  background: #5ea8ff;
+.material-color-outline {
+  background: #171717;
 }
 
 .preview-toolbar {

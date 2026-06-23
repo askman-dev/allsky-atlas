@@ -1,4 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useTransition } from 'react';
+import * as THREE from 'three';
+import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import {
   projectNorth,
   projectSouth,
@@ -50,14 +53,20 @@ const DEFAULT_3D_MODEL_SETTINGS = {
   cardWidthMm: 120,
   baseThicknessMm: 2.4,
   reliefHeightMm: 1.4,
+  showMythLines: false,
+  showStarConnectionLines: true,
+  surfaceLineWidthMm: 1,
   grooveDiameterMm: 4.8,
   grooveDepthMm: 1.2,
+  starPositionMode: 'recessed',
   outlinePaddingMm: 11,
 };
+const SURFACE_LINE_HEIGHT_MM = 1;
 const clampModelScale = (scale) => Math.min(2.8, Math.max(0.45, scale));
 const degToRad = (degrees) => degrees * Math.PI / 180;
 const MIN_CARD_VIEW_ANGLE_DEG = 30;
-const MIN_CARD_NORMAL_Z = Math.sin(degToRad(MIN_CARD_VIEW_ANGLE_DEG));
+const MIN_CARD_VIEW_PITCH_DEG = -(90 - MIN_CARD_VIEW_ANGLE_DEG);
+const MAX_CARD_VIEW_PITCH_DEG = 0;
 const multiplyMatrix4 = (a, b) => {
   const output = new Array(16).fill(0);
   for (let row = 0; row < 4; row++) {
@@ -106,25 +115,15 @@ const rotationZMatrix = (degrees) => {
   ];
 };
 
-const getCardNormalViewZ = (matrix) => matrix[10];
+const getCardViewPitchDegrees = (matrix) => Math.atan2(matrix[9], matrix[10]) * 180 / Math.PI;
 
 const applyLimitedViewPitch = (matrix, pitchDegrees) => {
-  const applyPitch = (degrees) => multiplyMatrix4(rotationXMatrix(degrees), matrix);
-  const candidate = applyPitch(pitchDegrees);
-  if (getCardNormalViewZ(candidate) >= MIN_CARD_NORMAL_Z) return candidate;
-
-  let low = 0;
-  let high = pitchDegrees;
-  for (let i = 0; i < 18; i++) {
-    const mid = (low + high) / 2;
-    const midMatrix = applyPitch(mid);
-    if (getCardNormalViewZ(midMatrix) >= MIN_CARD_NORMAL_Z) {
-      low = mid;
-    } else {
-      high = mid;
-    }
-  }
-  return applyPitch(low);
+  const currentPitch = getCardViewPitchDegrees(matrix);
+  const nextPitch = Math.min(
+    MAX_CARD_VIEW_PITCH_DEG,
+    Math.max(MIN_CARD_VIEW_PITCH_DEG, currentPitch + pitchDegrees),
+  );
+  return rotationXMatrix(nextPitch);
 };
 
 const matrixToCssMatrix3d = (matrix) => (
@@ -137,7 +136,7 @@ const matrixToCssMatrix3d = (matrix) => (
 );
 
 const DEFAULT_3D_VIEW = {
-  viewMatrix: rotationXMatrix(44),
+  viewMatrix: rotationXMatrix(-38),
   modelMatrix: rotationZMatrix(0),
   scale: 1,
 };
@@ -214,6 +213,56 @@ const getDisplayLanguage = (mode) => mode === 'zh' ? 'zh' : 'en';
 const getConstellationStarHipsFromEdges = (edges = []) => (
   [...new Set(edges.flat())]
 );
+
+const projectWesternConstellationGraph = (constellation, starsMap, contentWidth) => {
+  const hips = getConstellationStarHipsFromEdges(constellation?.edges);
+  const sourceStars = hips.map((hip) => starsMap.get(hip)).filter(Boolean);
+  if (sourceStars.length === 0) return null;
+
+  const sinRa = sourceStars.reduce((sum, star) => sum + Math.sin(star.ra * Math.PI / 180), 0);
+  const cosRa = sourceStars.reduce((sum, star) => sum + Math.cos(star.ra * Math.PI / 180), 0);
+  const centerRa = (Math.atan2(sinRa, cosRa) * 180 / Math.PI + 360) % 360;
+  const centerDec = sourceStars.reduce((sum, star) => sum + star.dec, 0) / sourceStars.length;
+  const decScale = Math.cos(centerDec * Math.PI / 180);
+  const rawPoints = sourceStars.map((star) => {
+    let deltaRa = star.ra - centerRa;
+    if (deltaRa > 180) deltaRa -= 360;
+    if (deltaRa < -180) deltaRa += 360;
+    return {
+      hip: star.hip,
+      x: deltaRa * decScale,
+      y: -(star.dec - centerDec),
+      mag: star.mag,
+      nameEn: star.nameEn,
+      nameZh: star.nameZh,
+    };
+  });
+
+  const minX = Math.min(...rawPoints.map((point) => point.x));
+  const maxX = Math.max(...rawPoints.map((point) => point.x));
+  const minY = Math.min(...rawPoints.map((point) => point.y));
+  const maxY = Math.max(...rawPoints.map((point) => point.y));
+  const rawWidth = Math.max(0.1, maxX - minX);
+  const rawHeight = Math.max(0.1, maxY - minY);
+  const scale = contentWidth / Math.max(rawWidth, rawHeight);
+  const offsetX = -((minX + maxX) / 2) * scale;
+  const offsetY = -((minY + maxY) / 2) * scale;
+  const points = rawPoints.map((point) => ({
+    ...point,
+    x: point.x * scale + offsetX,
+    y: point.y * scale + offsetY,
+  }));
+  const pointsByHip = new Map(points.map((point) => [point.hip, point]));
+  const edges = (constellation.edges || [])
+    .map(([fromHip, toHip]) => {
+      const from = pointsByHip.get(fromHip);
+      const to = pointsByHip.get(toHip);
+      return from && to ? { from, to, source: 'western-poster-data' } : null;
+    })
+    .filter(Boolean);
+
+  return { points, edges };
+};
 
 const SILHOUETTE_GROUP_BY_ABBR = {
   ORI: 'hunter',
@@ -304,6 +353,17 @@ const SILHOUETTE_GROUP_BY_ABBR = {
   LEP: 'ram',
   LYN: 'lion',
   VUL: 'wolf',
+};
+
+const LINE_ART_STAR_OVERRIDES = {
+  LIB: [
+    { hip: 76333, nameEn: 'Zubenelhakrabi', nameZh: '氐宿三' },
+    { hip: 74785, nameEn: 'Zubeneschamali', nameZh: '氐宿四' },
+    { hip: 77853, nameEn: 'Theta Librae', nameZh: '西咸三' },
+    { hip: 73714, nameEn: 'Brachium', nameZh: '折威七' },
+    { hip: 72622, nameEn: 'Zubenelgenubi II', nameZh: '氐宿一' },
+    { hip: 72603, nameEn: 'Zubenelgenubi I', nameZh: '氐宿增七' },
+  ],
 };
 
 const SILHOUETTE_DETAIL_LINES = {
@@ -608,6 +668,112 @@ const buildMythicSilhouette = (constellation, points, settings) => {
   return { outline, detailLines };
 };
 
+const expandPolygonFromCenter = (polygon, padding) => polygon.map((point) => {
+  const length = Math.hypot(point.x, point.y) || 1;
+  return {
+    x: point.x + (point.x / length) * padding,
+    y: point.y + (point.y / length) * padding,
+  };
+});
+
+const getLineArtStarLabels = (constellation, starsMap, circleCount) => {
+  const override = LINE_ART_STAR_OVERRIDES[constellation.abbr] || [];
+  if (override.length > 0) return override;
+
+  return getConstellationStarHipsFromEdges(constellation.edges)
+    .map((hip) => starsMap.get(hip))
+    .filter(Boolean)
+    .sort((a, b) => a.mag - b.mag)
+    .slice(0, circleCount)
+    .map((star) => ({
+      hip: star.hip,
+      nameEn: star.nameEn || `HIP ${star.hip}`,
+      nameZh: star.nameZh || star.nameEn || `HIP ${star.hip}`,
+    }));
+};
+
+const buildLineArtConstellationModel = (constellation, lineArt, settings, starsMap = new Map()) => {
+  if (!constellation || !lineArt?.bounds) {
+    return null;
+  }
+
+  const rawWidth = Math.max(1, lineArt.bounds.maxX - lineArt.bounds.minX);
+  const rawHeight = Math.max(1, lineArt.bounds.maxY - lineArt.bounds.minY);
+  const contentWidth = Math.max(20, settings.cardWidthMm - settings.outlinePaddingMm * 2);
+  const scale = contentWidth / Math.max(rawWidth, rawHeight);
+  const rawCenterX = (lineArt.bounds.minX + lineArt.bounds.maxX) / 2;
+  const rawCenterY = (lineArt.bounds.minY + lineArt.bounds.maxY) / 2;
+  const offsetX = -rawCenterX * scale;
+  const offsetY = -rawCenterY * scale;
+  const transformPoint = (point) => ({
+    x: point.x * scale + offsetX,
+    y: point.y * scale + offsetY,
+  });
+
+  const hull = Array.isArray(lineArt.hull) ? lineArt.hull : [];
+  if (hull.length < 3) return null;
+
+  const outline = expandPolygonFromCenter(hull.map(transformPoint), settings.outlinePaddingMm);
+  const starLabels = getLineArtStarLabels(constellation, starsMap, lineArt.circles.length);
+  const points = lineArt.circles.map((circle, index) => ({
+    hip: starLabels[index]?.hip || `${constellation.abbr}-lineart-${index}`,
+    x: circle.x * scale + offsetX,
+    y: circle.y * scale + offsetY,
+    mag: Math.max(0, 5 - circle.r),
+    sourceRadius: circle.r * scale,
+    nameEn: starLabels[index]?.nameEn || `Star ${index + 1}`,
+    nameZh: starLabels[index]?.nameZh || `星 ${index + 1}`,
+  }));
+  const edges = [];
+  let edgeSource = 'none';
+
+  for (const polyline of lineArt.polylines || []) {
+    for (let index = 0; index < polyline.length - 1; index++) {
+      edges.push({
+        from: transformPoint(polyline[index]),
+        to: transformPoint(polyline[index + 1]),
+        source: 'noirlab-polyline',
+      });
+    }
+  }
+
+  for (const line of lineArt.lines || []) {
+    edges.push({
+      from: transformPoint({ x: line.x1, y: line.y1 }),
+      to: transformPoint({ x: line.x2, y: line.y2 }),
+      source: 'noirlab-line',
+    });
+  }
+
+  for (const polygon of lineArt.polygons || []) {
+    for (let index = 0; index < polygon.length; index++) {
+      edges.push({
+        from: transformPoint(polygon[index]),
+        to: transformPoint(polygon[(index + 1) % polygon.length]),
+        source: 'noirlab-polygon',
+      });
+    }
+  }
+
+  if (edges.length > 0) edgeSource = 'noirlab-svg';
+
+  return {
+    points,
+    edges,
+    edgeSource,
+    outline,
+    detailLines: [],
+    lineArt: {
+      ...lineArt,
+      offsetX,
+      offsetY,
+      scale,
+      transform: `translate(${offsetX.toFixed(4)} ${offsetY.toFixed(4)}) scale(${scale.toFixed(6)})`,
+    },
+    silhouetteGroup: 'noirlab',
+  };
+};
+
 const pointInPolygon = (point, polygon) => {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -622,130 +788,18 @@ const pointInPolygon = (point, polygon) => {
   return inside;
 };
 
-const projectConstellationModel = (constellation, starsMap, settings) => {
+const projectConstellationModel = (constellation, starsMap, settings, lineArtMap = {}) => {
   if (!constellation) return null;
-  const hips = getConstellationStarHipsFromEdges(constellation.edges);
-  const sourceStars = hips.map((hip) => starsMap.get(hip)).filter(Boolean);
-  if (sourceStars.length === 0) return null;
+  const lineArtModel = buildLineArtConstellationModel(constellation, lineArtMap[constellation.abbr], settings, starsMap);
+  if (lineArtModel) return lineArtModel;
 
-  const sinRa = sourceStars.reduce((sum, star) => sum + Math.sin(star.ra * Math.PI / 180), 0);
-  const cosRa = sourceStars.reduce((sum, star) => sum + Math.cos(star.ra * Math.PI / 180), 0);
-  const centerRa = (Math.atan2(sinRa, cosRa) * 180 / Math.PI + 360) % 360;
-  const centerDec = sourceStars.reduce((sum, star) => sum + star.dec, 0) / sourceStars.length;
-  const decScale = Math.cos(centerDec * Math.PI / 180);
-  const rawPoints = sourceStars.map((star) => {
-    let deltaRa = star.ra - centerRa;
-    if (deltaRa > 180) deltaRa -= 360;
-    if (deltaRa < -180) deltaRa += 360;
-    return {
-      hip: star.hip,
-      x: deltaRa * decScale,
-      y: -(star.dec - centerDec),
-      mag: star.mag,
-      nameEn: star.nameEn,
-      nameZh: star.nameZh,
-    };
-  });
-
-  const minX = Math.min(...rawPoints.map((point) => point.x));
-  const maxX = Math.max(...rawPoints.map((point) => point.x));
-  const minY = Math.min(...rawPoints.map((point) => point.y));
-  const maxY = Math.max(...rawPoints.map((point) => point.y));
-  const rawWidth = Math.max(0.1, maxX - minX);
-  const rawHeight = Math.max(0.1, maxY - minY);
   const contentWidth = Math.max(20, settings.cardWidthMm - settings.outlinePaddingMm * 2);
-  const scale = contentWidth / Math.max(rawWidth, rawHeight);
-  const offsetX = -((minX + maxX) / 2) * scale;
-  const offsetY = -((minY + maxY) / 2) * scale;
-  const points = rawPoints.map((point) => ({
-    ...point,
-    x: point.x * scale + offsetX,
-    y: point.y * scale + offsetY,
-  }));
+  const westernGraph = projectWesternConstellationGraph(constellation, starsMap, contentWidth);
+  if (!westernGraph) return null;
+  const { points, edges } = westernGraph;
   const { outline, detailLines } = buildMythicSilhouette(constellation, points, settings);
-  const edges = constellation.edges
-    .map(([fromHip, toHip]) => {
-      const from = points.find((point) => point.hip === fromHip);
-      const to = points.find((point) => point.hip === toHip);
-      return from && to ? { from, to } : null;
-    })
-    .filter(Boolean);
 
-  return { points, edges, outline, detailLines, silhouetteGroup: getSilhouetteGroup(constellation) };
-};
-
-const makeFacet = (a, b, c) => (
-  `  facet normal 0 0 0\n    outer loop\n      vertex ${a[0].toFixed(4)} ${a[1].toFixed(4)} ${a[2].toFixed(4)}\n      vertex ${b[0].toFixed(4)} ${b[1].toFixed(4)} ${b[2].toFixed(4)}\n      vertex ${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)}\n    endloop\n  endfacet\n`
-);
-
-const makeQuad = (a, b, c, d) => makeFacet(a, b, c) + makeFacet(a, c, d);
-
-const createConstellationStl = (model, settings, name) => {
-  const xs = model.outline.map((point) => point.x);
-  const ys = model.outline.map((point) => point.y);
-  const minX = Math.floor(Math.min(...xs));
-  const maxX = Math.ceil(Math.max(...xs));
-  const minY = Math.floor(Math.min(...ys));
-  const maxY = Math.ceil(Math.max(...ys));
-  const targetCells = 94;
-  const cell = Math.max(1.2, Math.max(maxX - minX, maxY - minY) / targetCells);
-  const cols = Math.ceil((maxX - minX) / cell);
-  const rows = Math.ceil((maxY - minY) / cell);
-  const bottomZ = 0;
-  const topZ = settings.baseThicknessMm + settings.reliefHeightMm;
-  const grooveZ = Math.max(settings.baseThicknessMm * 0.35, topZ - settings.grooveDepthMm);
-  const grooveRadius = settings.grooveDiameterMm / 2;
-  const heights = [];
-
-  for (let row = 0; row < rows; row++) {
-    heights[row] = [];
-    for (let col = 0; col < cols; col++) {
-      const x = minX + (col + 0.5) * cell;
-      const y = minY + (row + 0.5) * cell;
-      if (!pointInPolygon({ x, y }, model.outline)) {
-        heights[row][col] = null;
-        continue;
-      }
-      const inGroove = model.points.some((star) => Math.hypot(star.x - x, star.y - y) <= grooveRadius);
-      heights[row][col] = inGroove ? grooveZ : topZ;
-    }
-  }
-
-  let facets = `solid ${name}\n`;
-  const corner = (col, row, z) => [minX + col * cell, minY + row * cell, z];
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const height = heights[row][col];
-      if (height === null) continue;
-      const a = corner(col, row, height);
-      const b = corner(col + 1, row, height);
-      const c = corner(col + 1, row + 1, height);
-      const d = corner(col, row + 1, height);
-      facets += makeQuad(a, b, c, d);
-      facets += makeQuad(corner(col, row, bottomZ), corner(col, row + 1, bottomZ), corner(col + 1, row + 1, bottomZ), corner(col + 1, row, bottomZ));
-
-      const neighbors = [
-        { dc: 0, dr: -1, side: [corner(col, row, bottomZ), corner(col + 1, row, bottomZ), b, a] },
-        { dc: 1, dr: 0, side: [corner(col + 1, row, bottomZ), corner(col + 1, row + 1, bottomZ), c, b] },
-        { dc: 0, dr: 1, side: [corner(col + 1, row + 1, bottomZ), corner(col, row + 1, bottomZ), d, c] },
-        { dc: -1, dr: 0, side: [corner(col, row + 1, bottomZ), corner(col, row, bottomZ), a, d] },
-      ];
-
-      for (const neighbor of neighbors) {
-        const nextHeight = heights[row + neighbor.dr]?.[col + neighbor.dc] ?? null;
-        if (nextHeight === null) {
-          facets += makeQuad(...neighbor.side);
-        } else if (Math.abs(nextHeight - height) > 0.001) {
-          const high = Math.max(nextHeight, height);
-          const low = Math.min(nextHeight, height);
-          const [p0, p1] = neighbor.side;
-          facets += makeQuad([p0[0], p0[1], low], [p1[0], p1[1], low], [p1[0], p1[1], high], [p0[0], p0[1], high]);
-        }
-      }
-    }
-  }
-  facets += `endsolid ${name}\n`;
-  return facets;
+  return { points, edges, edgeSource: 'western-poster-data', outline, detailLines, silhouetteGroup: getSilhouetteGroup(constellation) };
 };
 
 const POSTER_COPY_PRESETS = {
@@ -845,7 +899,13 @@ const UI_TEXT = {
     print3dConstellation: 'Constellation',
     print3dCardWidth: 'Card Width',
     print3dBaseThickness: 'Base Thickness',
+    print3dBaseGroup: 'Base',
+    print3dLayerGroup: 'Layers',
+    print3dStarGroup: 'Stars & Grooves',
+    print3dMythLines: 'Myth Story Lines',
+    print3dStarConnectionLines: 'Star Connection Grooves',
     print3dReliefHeight: 'Raised Relief',
+    print3dSurfaceLineWidth: 'Story Line Width',
     print3dGrooveDiameter: 'Star Groove Diameter',
     print3dGrooveDepth: 'Star Groove Depth',
     print3dOutlinePadding: 'Shape Padding',
@@ -854,6 +914,8 @@ const UI_TEXT = {
     print3dNoteShape: 'The card outline follows the constellation footprint instead of a fixed rectangle.',
     print3dNoteGroove: 'Star dots are recessed wells for glow powder and deer-glue binder.',
     print3dNoteMount: 'Print the model flat, fill the wells after curing, then mount it on the ceiling.',
+    toggleOn: 'On',
+    toggleOff: 'Off',
     exportedStl: 'Exported constellation STL model.',
     exportStlFailed: 'STL export failed. Check the current constellation data.',
   },
@@ -942,7 +1004,13 @@ const UI_TEXT = {
     print3dConstellation: '星座',
     print3dCardWidth: '卡片宽度',
     print3dBaseThickness: '底板厚度',
+    print3dBaseGroup: '底板',
+    print3dLayerGroup: '图层',
+    print3dStarGroup: '星点与凹槽',
+    print3dMythLines: '神话线条',
+    print3dStarConnectionLines: '星星连线凹槽',
     print3dReliefHeight: '浮雕高度',
+    print3dSurfaceLineWidth: '神话线条宽度',
     print3dGrooveDiameter: '星点凹槽直径',
     print3dGrooveDepth: '星点凹槽深度',
     print3dOutlinePadding: '轮廓留边',
@@ -951,6 +1019,8 @@ const UI_TEXT = {
     print3dNoteShape: '卡片轮廓跟随星座恒星与连线的形态，不使用固定矩形。',
     print3dNoteGroove: '星点是带厚度的凹槽，可在内部填入荧光粉与鹿胶合剂。',
     print3dNoteMount: '模型平放打印，固化后填充星点，再贴到室内天花板。',
+    toggleOn: '有',
+    toggleOff: '无',
     exportedStl: '已导出星座 STL 模型。',
     exportStlFailed: '导出 STL 失败，请检查当前星座数据。',
   },
@@ -1123,12 +1193,561 @@ const buildBoundarySegments = (boundaries) => {
   return segments;
 };
 
+const disposeThreeObject = (object) => {
+  object.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((material) => {
+        if (material.map) material.map.dispose();
+        material.dispose();
+      });
+    }
+  });
+};
+
+const toThreeMatrix = (matrix, scale = 1) => {
+  const threeMatrix = new THREE.Matrix4().set(
+    matrix[0], matrix[1], matrix[2], matrix[3],
+    matrix[4], matrix[5], matrix[6], matrix[7],
+    matrix[8], matrix[9], matrix[10], matrix[11],
+    matrix[12], matrix[13], matrix[14], matrix[15],
+  );
+  return threeMatrix.multiply(new THREE.Matrix4().makeScale(scale, scale, scale));
+};
+
+const createShapeFromOutline = (outline, holes = []) => {
+  const shape = new THREE.Shape();
+  if (outline.length === 0) return shape;
+  shape.moveTo(outline[0].x, -outline[0].y);
+  for (let index = 1; index < outline.length; index++) {
+    shape.lineTo(outline[index].x, -outline[index].y);
+  }
+  shape.closePath();
+  for (const hole of holes) {
+    const path = new THREE.Path();
+    if (Array.isArray(hole.points) && hole.points.length > 2) {
+      path.moveTo(hole.points[0].x, -hole.points[0].y);
+      for (let index = 1; index < hole.points.length; index++) {
+        path.lineTo(hole.points[index].x, -hole.points[index].y);
+      }
+      path.closePath();
+      shape.holes.push(path);
+      continue;
+    }
+    const segments = 40;
+    for (let index = segments; index >= 0; index--) {
+      const angle = (Math.PI * 2 * index) / segments;
+      const x = hole.x + Math.cos(angle) * hole.radius;
+      const y = -hole.y + Math.sin(angle) * hole.radius;
+      if (index === segments) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    shape.holes.push(path);
+  }
+  return shape;
+};
+
+const lineArtPointToModel = (point, lineArt) => ({
+  x: point.x * lineArt.scale + lineArt.offsetX,
+  y: point.y * lineArt.scale + lineArt.offsetY,
+});
+
+const toVector3 = (point, z) => new THREE.Vector3(point.x, -point.y, z);
+
+const createTubeMesh = (points, z, radius, material, closed = false) => {
+  if (points.length < 2) return null;
+  const vectors = points.map((point) => toVector3(point, z));
+  const curve = vectors.length === 2
+    ? new THREE.LineCurve3(vectors[0], vectors[1])
+    : new THREE.CatmullRomCurve3(vectors, closed, 'centripetal');
+  const geometry = new THREE.TubeGeometry(curve, Math.max(6, points.length * 2), radius, 8, closed);
+  return new THREE.Mesh(geometry, material);
+};
+
+const createFlatLineMesh = (points, z, material, closed = false) => {
+  if (points.length < 2) return null;
+  const vectors = points.map((point) => toVector3(point, z));
+  if (closed) vectors.push(vectors[0].clone());
+  const geometry = new THREE.BufferGeometry().setFromPoints(vectors);
+  return new THREE.Line(geometry, material);
+};
+
+const createFlatStripMesh = (points, z, width, material, closed = false) => {
+  if (points.length < 2) return null;
+  const vertices = [];
+  const indices = [];
+  const sourcePoints = closed ? [...points, points[0]] : points;
+
+  for (let index = 0; index < sourcePoints.length - 1; index++) {
+    const a = sourcePoints[index];
+    const b = sourcePoints[index + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const nx = (-dy / length) * width / 2;
+    const ny = (dx / length) * width / 2;
+    const base = vertices.length / 3;
+    vertices.push(
+      a.x + nx, -a.y - ny, z,
+      a.x - nx, -a.y + ny, z,
+      b.x + nx, -b.y - ny, z,
+      b.x - nx, -b.y + ny, z,
+    );
+    indices.push(base, base + 2, base + 1, base + 2, base + 3, base + 1);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, material);
+};
+
+const createStarLabelSprite = (text) => {
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  const fontSize = 34;
+  context.font = `600 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const metrics = context.measureText(text);
+  const width = Math.ceil(metrics.width + 24);
+  const height = 54;
+  canvas.width = Math.min(512, Math.max(128, Math.ceil(width / 2) * 2));
+  canvas.height = 64;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.font = `600 ${fontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  context.textBaseline = 'middle';
+  context.fillStyle = 'rgba(255, 252, 242, 0.84)';
+  context.fillRect(0, 4, Math.min(width, canvas.width), height);
+  context.strokeStyle = 'rgba(23, 23, 23, 0.22)';
+  context.lineWidth = 2;
+  context.strokeRect(1, 5, Math.min(width, canvas.width) - 2, height - 2);
+  context.fillStyle = '#171717';
+  context.fillText(text, 12, canvas.height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(material);
+  const labelWidth = Math.max(14, Math.min(42, canvas.width / 10));
+  sprite.scale.set(labelWidth, labelWidth * (canvas.height / canvas.width), 1);
+  return sprite;
+};
+
+const applySvgTransformToPoint = (point, transform) => {
+  if (!transform) return point;
+  const rotate = transform.match(/rotate\(([-\d.]+)(?:[\s,]+([-\d.]+)[\s,]+([-\d.]+))?\)/);
+  if (!rotate) return point;
+  const degrees = Number(rotate[1]);
+  const cx = Number(rotate[2] ?? 0);
+  const cy = Number(rotate[3] ?? 0);
+  if (!Number.isFinite(degrees) || !Number.isFinite(cx) || !Number.isFinite(cy)) return point;
+  const rad = degToRad(degrees);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = point.x - cx;
+  const dy = point.y - cy;
+  return {
+    x: cx + dx * cos - dy * sin,
+    y: cy + dx * sin + dy * cos,
+  };
+};
+
+const sampleEllipsePoints = (ellipse, lineArt) => {
+  const points = [];
+  for (let step = 0; step < 48; step++) {
+    const angle = (Math.PI * 2 * step) / 48;
+    const raw = applySvgTransformToPoint({
+      x: ellipse.cx + Math.cos(angle) * ellipse.rx,
+      y: ellipse.cy + Math.sin(angle) * ellipse.ry,
+    }, ellipse.transform);
+    points.push(lineArtPointToModel(raw, lineArt));
+  }
+  return points;
+};
+
+const getSvgPathPointSets = (paths, lineArt) => {
+  const loader = new SVGLoader();
+  const pointSets = [];
+  const escapeAttr = (value) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  for (const d of paths || []) {
+    const parsed = loader.parse(`<svg xmlns="http://www.w3.org/2000/svg"><path d="${escapeAttr(d)}"/></svg>`);
+    for (const path of parsed.paths) {
+      for (const subPath of path.subPaths || []) {
+        const points = subPath.getPoints(24).map((point) => lineArtPointToModel(point, lineArt));
+        if (points.length > 1) pointSets.push(points);
+      }
+    }
+  }
+  return pointSets;
+};
+
+const createSegmentHole = (from, to, width, insetStart = 0, insetEnd = 0) => {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 0.001) return null;
+  const start = Math.min(length / 2 - 0.001, Math.max(0, insetStart));
+  const end = Math.min(length / 2 - 0.001, Math.max(0, insetEnd));
+  const ax = from.x + (dx / length) * start;
+  const ay = from.y + (dy / length) * start;
+  const bx = to.x - (dx / length) * end;
+  const by = to.y - (dy / length) * end;
+  const nx = (-dy / length) * width / 2;
+  const ny = (dx / length) * width / 2;
+  return {
+    points: [
+      { x: ax + nx, y: ay + ny },
+      { x: bx + nx, y: by + ny },
+      { x: bx - nx, y: by - ny },
+      { x: ax - nx, y: ay - ny },
+    ],
+  };
+};
+
+const addExtrudedShapeMesh = (group, shape, depth, z, material) => {
+  if (depth <= 0.001) return null;
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: false,
+    curveSegments: 16,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.z = z;
+  group.add(mesh);
+  return mesh;
+};
+
+const addSurfaceArtworkMeshes = (group, model, z, width, material) => {
+  const addSurfaceLine = (pointSet, closed = false) => {
+    const mesh = createFlatStripMesh(pointSet, z, width, material, closed);
+    if (mesh) group.add(mesh);
+  };
+
+  if (model.lineArt) {
+    for (const pointSet of getSvgPathPointSets(model.lineArt.paths, model.lineArt)) addSurfaceLine(pointSet);
+    for (const polygon of model.lineArt.polygons || []) {
+      addSurfaceLine(polygon.map((point) => lineArtPointToModel(point, model.lineArt)), true);
+    }
+    for (const ellipse of model.lineArt.ellipses || []) {
+      addSurfaceLine(sampleEllipsePoints(ellipse, model.lineArt), true);
+    }
+  } else {
+    for (const line of model.detailLines || []) addSurfaceLine(line);
+  }
+};
+
+const addSolidArtworkMeshes = (group, model, z, width, depth, material) => {
+  const addSurfaceLine = (pointSet, closed = false) => {
+    const sourcePoints = closed ? [...pointSet, pointSet[0]] : pointSet;
+    for (let index = 0; index < sourcePoints.length - 1; index++) {
+      const strip = createSegmentHole(sourcePoints[index], sourcePoints[index + 1], width);
+      if (!strip) continue;
+      addExtrudedShapeMesh(group, createShapeFromOutline(strip.points), depth, z, material);
+    }
+  };
+
+  if (model.lineArt) {
+    for (const pointSet of getSvgPathPointSets(model.lineArt.paths, model.lineArt)) addSurfaceLine(pointSet);
+    for (const polygon of model.lineArt.polygons || []) {
+      addSurfaceLine(polygon.map((point) => lineArtPointToModel(point, model.lineArt)), true);
+    }
+    for (const ellipse of model.lineArt.ellipses || []) {
+      addSurfaceLine(sampleEllipsePoints(ellipse, model.lineArt), true);
+    }
+  } else {
+    for (const line of model.detailLines || []) addSurfaceLine(line);
+  }
+};
+
+const createConstellationExportObject = (model, settings) => {
+  const group = new THREE.Group();
+  const baseMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const artworkMaterial = new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.DoubleSide });
+  const topZ = settings.baseThicknessMm;
+  const grooveDepth = Math.min(Math.max(0.08, topZ - 0.08), Math.max(1, topZ / 2));
+  const grooveFloorZ = Math.max(0.08, topZ - grooveDepth);
+  const starRadius = settings.grooveDiameterMm / 2;
+  const grooveWidth = Math.max(1.25, settings.grooveDiameterMm * 0.36);
+  const starIsRecessed = settings.starPositionMode !== 'raised';
+  const grooveInset = starIsRecessed ? starRadius + grooveWidth * 0.3 : grooveWidth * 0.5;
+  const grooveHoles = [
+    ...(settings.showStarConnectionLines === false ? [] : model.edges.map((edge) => createSegmentHole(edge.from, edge.to, grooveWidth, grooveInset, grooveInset)).filter(Boolean)),
+    ...(starIsRecessed ? (model.points || []).map((point) => ({
+      x: point.x,
+      y: point.y,
+      radius: starRadius,
+    })) : []),
+  ];
+
+  addExtrudedShapeMesh(group, createShapeFromOutline(model.outline), grooveFloorZ, 0, baseMaterial);
+  addExtrudedShapeMesh(
+    group,
+    createShapeFromOutline(model.outline, grooveHoles),
+    topZ - grooveFloorZ,
+    grooveFloorZ,
+    baseMaterial,
+  );
+
+  if (!starIsRecessed) {
+    const raisedHeight = Math.max(1, settings.baseThicknessMm / 2);
+    for (const point of model.points || []) {
+      const capGeometry = new THREE.CylinderGeometry(starRadius, starRadius, raisedHeight, 48);
+      const cap = new THREE.Mesh(capGeometry, baseMaterial);
+      cap.rotation.x = Math.PI / 2;
+      cap.position.set(point.x, -point.y, topZ + raisedHeight / 2);
+      group.add(cap);
+    }
+  }
+
+  if (settings.showMythLines !== false) {
+    addSolidArtworkMeshes(
+      group,
+      model,
+      topZ,
+      Math.max(0.1, settings.surfaceLineWidthMm || 1),
+      SURFACE_LINE_HEIGHT_MM,
+      artworkMaterial,
+    );
+  }
+
+  group.updateMatrixWorld(true);
+  return group;
+};
+
+const createConstellationStl = (model, settings) => {
+  const exportObject = createConstellationExportObject(model, settings);
+  const exporter = new STLExporter();
+  const stl = exporter.parse(exportObject, { binary: false });
+  disposeThreeObject(exportObject);
+  return stl;
+};
+
+function ConstellationModel3DPreview({ model, settings, modelView, displayLanguage }) {
+  const mountRef = useRef(null);
+  const rendererRef = useRef(null);
+  const cameraRef = useRef(null);
+  const rootRef = useRef(null);
+  const latestModelRef = useRef(model);
+  const resizeRef = useRef(null);
+  const renderSceneRef = useRef(null);
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return undefined;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-100, 100, 75, -75, 0.1, 1200);
+    camera.position.set(0, 0, 500);
+    camera.lookAt(0, 0, 0);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x000000, 0);
+    mount.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    const ambient = new THREE.AmbientLight(0xffffff, 1.45);
+    const key = new THREE.DirectionalLight(0xffffff, 2.4);
+    key.position.set(-70, -90, 180);
+    const rim = new THREE.DirectionalLight(0xffffff, 0.75);
+    rim.position.set(140, 120, 120);
+    scene.add(ambient, key, rim);
+
+    const root = new THREE.Group();
+    root.matrixAutoUpdate = false;
+    scene.add(root);
+    rootRef.current = root;
+
+    const resize = () => {
+      const width = mount.clientWidth || 1;
+      const height = mount.clientHeight || 1;
+      renderer.setSize(width, height, false);
+      const latestModel = latestModelRef.current;
+      const bounds = latestModel?.outline?.length ? getPolygonBounds(latestModel.outline) : { minX: -70, maxX: 70, minY: -70, maxY: 70 };
+      const modelWidth = Math.max(40, bounds.maxX - bounds.minX);
+      const modelHeight = Math.max(40, bounds.maxY - bounds.minY);
+      const frustumHeight = Math.max(modelHeight, modelWidth / (width / height || 1)) * 1.55;
+      const frustumWidth = frustumHeight * (width / height || 1);
+      camera.left = -frustumWidth / 2;
+      camera.right = frustumWidth / 2;
+      camera.top = frustumHeight / 2;
+      camera.bottom = -frustumHeight / 2;
+      camera.updateProjectionMatrix();
+      renderer.render(scene, camera);
+    };
+    resizeRef.current = resize;
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(mount);
+    resize();
+
+    renderSceneRef.current = () => {
+      renderer.render(scene, camera);
+    };
+    renderSceneRef.current();
+
+    return () => {
+      observer.disconnect();
+      disposeThreeObject(scene);
+      renderer.dispose();
+      renderer.domElement.remove();
+      resizeRef.current = null;
+      renderSceneRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    latestModelRef.current = model;
+    const root = rootRef.current;
+    if (!root || !model?.outline?.length) return undefined;
+    resizeRef.current?.();
+
+    while (root.children.length > 0) {
+      const child = root.children.pop();
+      disposeThreeObject(child);
+    }
+
+    const baseTopMaterial = new THREE.MeshStandardMaterial({ color: 0xeee7d6, roughness: 0.82, metalness: 0.02 });
+    const baseSideMaterial = new THREE.MeshStandardMaterial({ color: 0xb8b2a5, roughness: 0.92, metalness: 0.01 });
+    const surfaceLineMaterial = new THREE.MeshBasicMaterial({ color: 0x171717, side: THREE.DoubleSide });
+    const starIsRecessed = settings.starPositionMode !== 'raised';
+
+    const starHoleRadius = settings.grooveDiameterMm / 2;
+    const grooveWidth = Math.max(1.25, settings.grooveDiameterMm * 0.36);
+    const grooveInset = starIsRecessed ? starHoleRadius + grooveWidth * 0.3 : grooveWidth * 0.5;
+    const lineGrooveHoles = settings.showStarConnectionLines === false
+      ? []
+      : (model.edges || []).map((edge) => createSegmentHole(edge.from, edge.to, grooveWidth, grooveInset, grooveInset)).filter(Boolean);
+    const shape = createShapeFromOutline(
+      model.outline,
+      [
+        ...lineGrooveHoles,
+        ...(starIsRecessed ? (model.points || []).map((point) => ({
+          x: point.x,
+          y: point.y,
+          radius: starHoleRadius,
+        })) : []),
+      ],
+    );
+    const baseGeometry = new THREE.ExtrudeGeometry(shape, {
+      depth: settings.baseThicknessMm,
+      bevelEnabled: false,
+      curveSegments: 8,
+    });
+    const baseMesh = new THREE.Mesh(baseGeometry, [baseTopMaterial, baseSideMaterial]);
+    baseMesh.position.z = -settings.baseThicknessMm;
+    root.add(baseMesh);
+
+    const grooveDepth = Math.max(1, settings.baseThicknessMm / 2);
+    const clampedGrooveDepth = Math.min(settings.baseThicknessMm - 0.08, grooveDepth);
+    const grooveFloorZ = -clampedGrooveDepth;
+    const surfaceLineWidth = Math.max(0.1, settings.surfaceLineWidthMm || 1);
+    const addGrooveLine = (pointSet, closed = false) => {
+      const floor = createFlatStripMesh(pointSet, grooveFloorZ, grooveWidth, baseSideMaterial, closed);
+      if (floor) root.add(floor);
+    };
+    if (settings.showMythLines !== false) {
+      addSolidArtworkMeshes(root, model, 0, surfaceLineWidth, SURFACE_LINE_HEIGHT_MM, surfaceLineMaterial);
+    }
+    if (settings.showStarConnectionLines !== false) {
+      for (const edge of model.edges || []) addGrooveLine([edge.from, edge.to]);
+    }
+
+    for (const point of model.points || []) {
+      const radius = settings.grooveDiameterMm / 2;
+      if (starIsRecessed) {
+        const wallGeometry = new THREE.CylinderGeometry(radius, radius, clampedGrooveDepth, 40, 1, true);
+        const wall = new THREE.Mesh(wallGeometry, baseSideMaterial);
+        wall.rotation.x = Math.PI / 2;
+        wall.position.set(point.x, -point.y, -clampedGrooveDepth / 2);
+        root.add(wall);
+
+        const bottomGeometry = new THREE.CircleGeometry(radius, 40);
+        const bottom = new THREE.Mesh(bottomGeometry, baseSideMaterial);
+        bottom.position.set(point.x, -point.y, -clampedGrooveDepth);
+        root.add(bottom);
+      } else {
+        const raisedHeight = Math.max(1, settings.baseThicknessMm / 2);
+        const capGeometry = new THREE.CylinderGeometry(radius, radius, raisedHeight, 40);
+        const cap = new THREE.Mesh(capGeometry, baseTopMaterial);
+        cap.rotation.x = Math.PI / 2;
+        cap.position.set(point.x, -point.y, raisedHeight / 2);
+        root.add(cap);
+      }
+    }
+
+    for (const point of model.points || []) {
+      const label = displayLanguage === 'zh'
+        ? (point.nameZh || point.nameEn)
+        : (point.nameEn || point.nameZh);
+      if (!label) continue;
+      const sprite = createStarLabelSprite(label);
+      const labelZ = starIsRecessed ? 0.55 : Math.max(1, settings.baseThicknessMm / 2) + 0.65;
+      sprite.position.set(
+        point.x + settings.grooveDiameterMm * 0.85 + 1.6,
+        -point.y + settings.grooveDiameterMm * 0.55 + 1.2,
+        labelZ,
+      );
+      root.add(sprite);
+    }
+
+    if (mountRef.current) {
+      mountRef.current.dataset.renderMode = 'three-mesh';
+      mountRef.current.dataset.baseThicknessMm = String(settings.baseThicknessMm);
+      mountRef.current.dataset.reliefHeightMm = String(settings.reliefHeightMm);
+      mountRef.current.dataset.surfaceLineWidthMm = String(surfaceLineWidth);
+      mountRef.current.dataset.surfaceLineHeightMm = String(SURFACE_LINE_HEIGHT_MM);
+      mountRef.current.dataset.showMythLines = String(settings.showMythLines !== false);
+      mountRef.current.dataset.showStarConnectionLines = String(settings.showStarConnectionLines !== false);
+      mountRef.current.dataset.lineGrooveHoleCount = String(lineGrooveHoles.length);
+      mountRef.current.dataset.lineGrooveEdgeSource = model.edgeSource || 'projected';
+      mountRef.current.dataset.lineGrooveFloorNormals = 'up';
+      mountRef.current.dataset.grooveDiameterMm = String(settings.grooveDiameterMm);
+      mountRef.current.dataset.grooveDepthMm = String(clampedGrooveDepth);
+      mountRef.current.dataset.starPositionMode = settings.starPositionMode;
+      mountRef.current.dataset.outlinePoints = String(model.outline.length);
+      mountRef.current.dataset.starCount = String(model.points?.length || 0);
+      mountRef.current.dataset.starLabelCount = String((model.points || []).filter((point) => point.nameEn || point.nameZh).length);
+      mountRef.current.dataset.meshCount = String(root.children.length);
+      mountRef.current.dataset.groovePreview = starIsRecessed ? 'subtracted-material-holes' : 'raised-material-stars';
+    }
+    renderSceneRef.current?.();
+
+    return () => {
+      while (root.children.length > 0) {
+        const child = root.children.pop();
+        disposeThreeObject(child);
+      }
+    };
+  }, [model, settings, displayLanguage]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const matrix = toThreeMatrix(multiplyMatrix4(modelView.viewMatrix, modelView.modelMatrix), modelView.scale);
+    root.matrix.copy(matrix);
+    if (mountRef.current) {
+      mountRef.current.dataset.viewPitchDeg = getCardViewPitchDegrees(modelView.viewMatrix).toFixed(2);
+    }
+    renderSceneRef.current?.();
+  }, [modelView]);
+
+  return <div ref={mountRef} className="constellation-3d-canvas" data-testid="constellation-3d-canvas" data-render-mode="three-mesh" />;
+}
+
 function App() {
   // --- State Variables ---
   const [stars, setStars] = useState([]);
   const [westernConstellations, setWesternConstellations] = useState([]);
   const [chineseConstellations, setChineseConstellations] = useState([]);
   const [boundaries, setBoundaries] = useState({});
+  const [constellationLineArt, setConstellationLineArt] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
@@ -1322,17 +1941,21 @@ function App() {
         setLoading(true);
         // Fetch JSON files compiled by ingest script
         const basePath = import.meta.env.BASE_URL || '/';
-        const [starsRes, westernRes, chineseRes, boundariesRes] = await Promise.all([
+        const [starsRes, westernRes, chineseRes, boundariesRes, lineArtRes] = await Promise.all([
           fetch(`${basePath}data/stars.normalized.json`).then(r => r.json()),
           fetch(`${basePath}data/constellations.western.json`).then(r => r.json()),
           fetch(`${basePath}data/constellations.chinese.json`).then(r => r.json()),
           fetch(`${basePath}data/boundaries.json`).then(r => r.json()),
+          fetch(`${basePath}data/noirlab-lineart.json`)
+            .then(r => r.ok ? r.json() : { constellations: {} })
+            .catch(() => ({ constellations: {} })),
         ]);
 
         setStars(starsRes);
         setWesternConstellations(westernRes);
         setChineseConstellations(chineseRes);
         setBoundaries(boundariesRes);
+        setConstellationLineArt(lineArtRes.constellations || {});
         setLoading(false);
       } catch (err) {
         console.error("Failed to load astronomical data:", err);
@@ -1376,9 +1999,18 @@ function App() {
     westernConstellations[0]
   ), [westernConstellations, modelSettings.constellationAbbr]);
 
+  useEffect(() => {
+    if (!selected3dConstellation) return;
+    modelDragStateRef.current = null;
+    setModelView((current) => ({
+      ...current,
+      modelMatrix: DEFAULT_3D_VIEW.modelMatrix,
+    }));
+  }, [selected3dConstellation?.abbr]);
+
   const constellation3dModel = useMemo(() => (
-    projectConstellationModel(selected3dConstellation, starsMap, modelSettings)
-  ), [selected3dConstellation, starsMap, modelSettings]);
+    projectConstellationModel(selected3dConstellation, starsMap, modelSettings, constellationLineArt)
+  ), [selected3dConstellation, starsMap, modelSettings, constellationLineArt]);
 
   // --- Centroid Calculation for Constellations (Spherical Average) ---
   const getConstellationCentroid = (edges) => {
@@ -3164,6 +3796,15 @@ function App() {
     try {
       const modelName = `${selected3dConstellation.abbr.toLowerCase()}_glow_constellation_card`;
       const stl = createConstellationStl(constellation3dModel, modelSettings, modelName);
+      const previewNode = document.querySelector('[data-testid="constellation-3d-canvas"]');
+      if (previewNode) {
+        previewNode.dataset.lastStlExporter = 'three-vector';
+        previewNode.dataset.lastStlBytes = String(stl.length);
+        previewNode.dataset.lastStlFacets = String((stl.match(/facet normal/g) || []).length);
+        previewNode.dataset.lastStlSurfaceLineHeightMm = String(SURFACE_LINE_HEIGHT_MM);
+        previewNode.dataset.lastStlMythLines = String(modelSettings.showMythLines !== false);
+        previewNode.dataset.lastStlStarConnectionLines = String(modelSettings.showStarConnectionLines !== false);
+      }
       downloadBlob(new Blob([stl], { type: 'model/stl' }), `${modelName}.stl`);
       showToast(uiText.exportedStl);
     } catch (e) {
@@ -3431,9 +4072,9 @@ function App() {
     if (!dragState || dragState.pointerId !== event.pointerId) return;
     const deltaX = event.clientX - dragState.startX;
     const deltaY = event.clientY - dragState.startY;
-    const localSpinAroundNormal = rotationZMatrix(-deltaX * 0.35);
+    const localSpinAroundNormal = rotationZMatrix(deltaX * 0.35);
     const spunAroundModelNormal = multiplyMatrix4(dragState.modelMatrix, localSpinAroundNormal);
-    const limitedViewMatrix = applyLimitedViewPitch(dragState.viewMatrix, -deltaY * 0.35);
+    const limitedViewMatrix = applyLimitedViewPitch(dragState.viewMatrix, deltaY * 0.35);
     setModelView((current) => ({
       ...current,
       viewMatrix: limitedViewMatrix,
@@ -3469,27 +4110,66 @@ function App() {
         max={max}
         step={step}
         value={modelSettings[key]}
+        onInput={(e) => updateModelSetting(key, Number(e.currentTarget.value))}
         onChange={(e) => updateModelSetting(key, Number(e.target.value))}
       />
     </div>
   );
 
+  const renderModelSegmentToggle = (key, label, options = {}) => {
+    const checked = modelSettings[key] !== false;
+    const compactInline = options.compactInline === true;
+    return (
+      <div className={`form-field ${compactInline ? 'inline-toggle-field' : ''}`}>
+        <label>{label}</label>
+        <div className={`segmented-control ${compactInline ? 'segmented-control-compact' : ''}`} role="group" aria-label={label}>
+          <button
+            type="button"
+            className={`segment-button ${checked ? 'active' : ''}`}
+            onClick={() => updateModelSetting(key, true)}
+          >
+            {uiText.toggleOn}
+          </button>
+          <button
+            type="button"
+            className={`segment-button ${!checked ? 'active' : ''}`}
+            onClick={() => updateModelSetting(key, false)}
+          >
+            {uiText.toggleOff}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderModelValueSegmentToggle = (key, label, options) => {
+    const compactInline = options.compactInline === true;
+    return (
+      <div className={`form-field ${compactInline ? 'inline-toggle-field' : ''}`}>
+        <label>{label}</label>
+        <div className={`segmented-control ${compactInline ? 'segmented-control-compact' : ''}`} role="group" aria-label={label}>
+          {options.items.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              className={`segment-button ${modelSettings[key] === item.value ? 'active' : ''}`}
+              onClick={() => updateModelSetting(key, item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const renderConstellation3dPage = () => {
-    const outline = constellation3dModel?.outline ?? [];
     const points = constellation3dModel?.points ?? [];
     const edges = constellation3dModel?.edges ?? [];
-    const detailLines = constellation3dModel?.detailLines ?? [];
-    const bounds = outline.length > 0 ? {
-      minX: Math.min(...outline.map((point) => point.x)),
-      maxX: Math.max(...outline.map((point) => point.x)),
-      minY: Math.min(...outline.map((point) => point.y)),
-      maxY: Math.max(...outline.map((point) => point.y)),
-    } : { minX: -70, maxX: 70, minY: -70, maxY: 70 };
-    const width = Math.max(20, bounds.maxX - bounds.minX);
-    const height = Math.max(20, bounds.maxY - bounds.minY);
-    const pad = 18;
-    const viewBox = `${bounds.minX - pad} ${bounds.minY - pad} ${width + pad * 2} ${height + pad * 2}`;
-    const outlinePoints = outline.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+    const computedGrooveDepthMm = Math.min(
+      Math.max(0.08, modelSettings.baseThicknessMm - 0.08),
+      Math.max(1, modelSettings.baseThicknessMm / 2),
+    );
 
     return (
       <>
@@ -3521,15 +4201,38 @@ function App() {
                           ? `${constellation.nameZh} (${constellation.nameEn})`
                           : `${constellation.nameEn} (${constellation.abbr})`}
                       </option>
-                    ))}
+                  ))}
                 </select>
               </div>
-              {renderModelRange('cardWidthMm', uiText.print3dCardWidth, 70, 180, 1)}
-              {renderModelRange('baseThicknessMm', uiText.print3dBaseThickness, 1.2, 6, 0.1)}
-              {renderModelRange('reliefHeightMm', uiText.print3dReliefHeight, 0.4, 4, 0.1)}
-              {renderModelRange('grooveDiameterMm', uiText.print3dGrooveDiameter, 2.4, 10, 0.1)}
-              {renderModelRange('grooveDepthMm', uiText.print3dGrooveDepth, 0.4, 3.5, 0.1)}
-              {renderModelRange('outlinePaddingMm', uiText.print3dOutlinePadding, 4, 24, 0.5)}
+              <div className="control-subgroup">
+                <h4 className="control-subgroup-title">{uiText.print3dBaseGroup}</h4>
+                {renderModelRange('cardWidthMm', uiText.print3dCardWidth, 70, 180, 1)}
+                {renderModelRange('baseThicknessMm', uiText.print3dBaseThickness, 1.2, 6, 0.1)}
+                {renderModelRange('outlinePaddingMm', uiText.print3dOutlinePadding, 4, 24, 0.5)}
+              </div>
+              <div className="control-subgroup">
+                <h4 className="control-subgroup-title">{uiText.print3dLayerGroup}</h4>
+                {renderModelSegmentToggle('showMythLines', uiText.print3dMythLines, { compactInline: true })}
+                {modelSettings.showMythLines !== false && renderModelRange('surfaceLineWidthMm', uiText.print3dSurfaceLineWidth, 0.2, 4, 0.1)}
+                {renderModelSegmentToggle('showStarConnectionLines', uiText.print3dStarConnectionLines, { compactInline: true })}
+              </div>
+              <div className="control-subgroup">
+                <h4 className="control-subgroup-title">{uiText.print3dStarGroup}</h4>
+                {renderModelValueSegmentToggle('starPositionMode', displayLanguage === 'zh' ? '星点形态' : 'Star position style', {
+                  compactInline: true,
+                  items: [
+                    { value: 'recessed', label: displayLanguage === 'zh' ? '凹陷' : 'In' },
+                    { value: 'raised', label: displayLanguage === 'zh' ? '凸起' : 'Out' },
+                  ],
+                })}
+                {renderModelRange('grooveDiameterMm', uiText.print3dGrooveDiameter, 2.4, 10, 0.1)}
+                <div className="form-field">
+                  <label>
+                    {uiText.print3dGrooveDepth} <span className="value">{computedGrooveDepthMm.toFixed(1)} mm</span>
+                  </label>
+                  <p className="control-tip compact">{displayLanguage === 'zh' ? '自动使用底板厚度的 1/2，且至少 1 mm。' : 'Automatically uses half of the base thickness, with a 1 mm minimum.'}</p>
+                </div>
+              </div>
             </div>
 
             <div className="control-group">
@@ -3574,67 +4277,12 @@ function App() {
               onPointerCancel={stopModelPointerDrag}
               onWheel={handleModelWheel}
             >
-              <div
-                className="constellation-3d-camera"
-                style={{
-                  transform: matrixToCssMatrix3d(modelView.viewMatrix),
-                }}
-              >
-                <div
-                  className="constellation-3d-model"
-                  style={{
-                    transform: `${matrixToCssMatrix3d(modelView.modelMatrix)} scale(${modelView.scale})`,
-                  }}
-                >
-                  <svg viewBox={viewBox} role="img" aria-label={uiText.print3dTitle}>
-                    <defs>
-                      <filter id="star-well-shadow" x="-20%" y="-20%" width="140%" height="140%">
-                        <feDropShadow dx="0" dy="1.4" stdDeviation="1.2" floodColor="#000000" floodOpacity="0.55" />
-                      </filter>
-                    </defs>
-                    <polygon points={outlinePoints} className="model-outline" />
-                    {detailLines.map((line, index) => (
-                      <polyline
-                        key={`model-detail-${index}`}
-                        points={line.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ')}
-                        className="model-detail-line"
-                      />
-                    ))}
-                    {edges.map((edge, index) => (
-                      <line
-                        key={`model-edge-${index}`}
-                        x1={edge.from.x}
-                        y1={edge.from.y}
-                        x2={edge.to.x}
-                        y2={edge.to.y}
-                        className="model-ridge"
-                      />
-                    ))}
-                    {points.map((point) => (
-                      <g key={point.hip} filter="url(#star-well-shadow)">
-                        <circle
-                          cx={point.x}
-                          cy={point.y}
-                          r={modelSettings.grooveDiameterMm / 2}
-                          className="model-star-well"
-                        />
-                        <circle
-                          cx={point.x}
-                          cy={point.y}
-                          r={Math.max(0.8, modelSettings.grooveDiameterMm / 5)}
-                          className="model-star-core"
-                        />
-                      </g>
-                    ))}
-                  </svg>
-                  <div className="model-axis-layer" aria-hidden="true">
-                    <span className="model-axis model-axis-x"><b>X</b></span>
-                    <span className="model-axis model-axis-y"><b>Y</b></span>
-                    <span className="model-axis model-axis-z"><b>Z</b></span>
-                    <span className="model-axis-origin"></span>
-                  </div>
-                </div>
-              </div>
+              <ConstellationModel3DPreview
+                model={constellation3dModel}
+                settings={modelSettings}
+                modelView={modelView}
+                displayLanguage={displayLanguage}
+              />
             </div>
             <div className="constellation-3d-specs">
               <span>{modelSettings.cardWidthMm.toFixed(0)} mm</span>
@@ -3642,10 +4290,9 @@ function App() {
               <span>{edges.length} lines</span>
               <span>{Math.round(modelView.scale * 100)}% view</span>
             </div>
-            <div className="constellation-3d-axis-legend" aria-label="Model local axes">
-              <span><i className="axis-color-x"></i>X 本地左右</span>
-              <span><i className="axis-color-y"></i>Y 本地竖直</span>
-              <span><i className="axis-color-z"></i>Z 表面法线</span>
+            <div className="constellation-3d-material-legend" aria-label="Print materials">
+              <span><i className="material-color-plane"></i>{displayLanguage === 'zh' ? '底板材料' : 'Plane material'}</span>
+              <span><i className="material-color-outline"></i>{displayLanguage === 'zh' ? '轮廓材料' : 'Outline material'}</span>
             </div>
           </section>
         </main>
